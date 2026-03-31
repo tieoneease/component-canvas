@@ -4,3 +4,4 @@ dist/
 bun.lock
 *.tgz
 .dev/
+tests/output/**/*.png
