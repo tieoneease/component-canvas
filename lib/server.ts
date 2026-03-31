@@ -23,50 +23,69 @@ export interface StartedServer {
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const appDir = resolve(packageRoot, 'app');
 const appConfigFile = resolve(appDir, 'vite.config.js');
+const appTailwindConfigFile = resolve(appDir, 'tailwind.config.js');
+const PROJECT_ROOT_ENV = 'COMPONENT_CANVAS_PROJECT_ROOT';
+const DISABLE_TAILWIND_FALLBACK_ENV = 'COMPONENT_CANVAS_DISABLE_TAILWIND_FALLBACK';
 
 export async function startServer(options: ServerOptions): Promise<StartedServer> {
   const resolvedCanvasDir = resolve(options.canvasDir);
   const resolvedProjectRoot = resolve(options.projectRoot ?? dirname(resolvedCanvasDir));
   const resolvedGlobalCss = resolveAllowPath(options.globalCss, resolvedProjectRoot);
+  const resolvedTailwindConfig = options.tailwindConfig ?? appTailwindConfigFile;
+  const restoreEnvironment = applyServerEnvironment(resolvedProjectRoot);
 
-  const server = await createServer({
-    root: appDir,
-    configFile: appConfigFile,
-    plugins: [
-      canvasVitePlugin({
-        ...options,
-        canvasDir: resolvedCanvasDir,
-        projectRoot: resolvedProjectRoot
-      })
-    ],
-    server: {
-      host: '127.0.0.1',
-      port: options.port,
-      strictPort: options.port !== undefined,
-      fs: {
-        allow: uniquePaths([appDir, resolvedProjectRoot, resolvedCanvasDir, resolvedGlobalCss])
-      }
-    }
-  });
-
+  let server: ViteDevServer | undefined;
   let closed = false;
 
   try {
+    server = await createServer({
+      root: appDir,
+      configFile: appConfigFile,
+      plugins: [
+        canvasVitePlugin({
+          ...options,
+          canvasDir: resolvedCanvasDir,
+          projectRoot: resolvedProjectRoot,
+          tailwindConfig: resolvedTailwindConfig
+        })
+      ],
+      server: {
+        host: '127.0.0.1',
+        port: options.port,
+        strictPort: options.port !== undefined,
+        fs: {
+          allow: uniquePaths([appDir, resolvedProjectRoot, resolvedCanvasDir, resolvedGlobalCss])
+        }
+      }
+    });
+
     await server.listen();
 
+    const startedServer = server;
+
     return {
-      url: resolveServerUrl(server),
+      url: resolveServerUrl(startedServer),
       close: async () => {
         if (closed) {
           return;
         }
 
         closed = true;
-        await server.close();
+
+        try {
+          await startedServer.close();
+        } finally {
+          restoreEnvironment();
+        }
       }
     };
   } catch (error) {
-    await safeClose(server);
+    restoreEnvironment();
+
+    if (server) {
+      await safeClose(server);
+    }
+
     throw error;
   }
 }
@@ -106,6 +125,28 @@ function resolveAllowPath(value: string | undefined, baseDir: string): string | 
 
 function uniquePaths(paths: Array<string | undefined>): string[] {
   return [...new Set(paths.filter((path): path is string => path !== undefined))];
+}
+
+function applyServerEnvironment(projectRoot: string): () => void {
+  const previousProjectRoot = process.env[PROJECT_ROOT_ENV];
+  const previousDisableFallback = process.env[DISABLE_TAILWIND_FALLBACK_ENV];
+
+  process.env[PROJECT_ROOT_ENV] = projectRoot;
+  process.env[DISABLE_TAILWIND_FALLBACK_ENV] = '1';
+
+  return () => {
+    if (previousProjectRoot === undefined) {
+      delete process.env[PROJECT_ROOT_ENV];
+    } else {
+      process.env[PROJECT_ROOT_ENV] = previousProjectRoot;
+    }
+
+    if (previousDisableFallback === undefined) {
+      delete process.env[DISABLE_TAILWIND_FALLBACK_ENV];
+    } else {
+      process.env[DISABLE_TAILWIND_FALLBACK_ENV] = previousDisableFallback;
+    }
+  };
 }
 
 async function safeClose(server: ViteDevServer): Promise<void> {
