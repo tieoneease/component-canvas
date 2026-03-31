@@ -3,8 +3,8 @@ import { fileURLToPath } from 'node:url';
 
 import { createServer, type ViteDevServer } from 'vite';
 
-import { loadConfig, type CanvasConfig } from './config.js';
-import canvasVitePlugin from './vite-plugin.js';
+import { loadConfig, type CanvasConfig } from './config.ts';
+import canvasVitePlugin from './vite-plugin.ts';
 
 export interface ServerOptions {
   canvasDir: string;

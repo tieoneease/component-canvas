@@ -6,14 +6,15 @@ import { dirname, join, relative, resolve } from 'node:path';
 
 import { Command, InvalidArgumentError } from 'commander';
 
-import { CANVAS_CONFIG_FILE_NAME, loadConfig, type CanvasConfig } from '../lib/config.js';
+import { CANVAS_CONFIG_FILE_NAME, loadConfig, type CanvasConfig } from '../lib/config.ts';
+import { initProject, type InitProjectResult } from '../lib/init.ts';
 import {
   parseWorkflowManifests,
   type ManifestError,
   type WorkflowManifest
-} from '../lib/manifest.js';
-import { createBrowserPool } from '../lib/screenshot.js';
-import { startServer } from '../lib/server.js';
+} from '../lib/manifest.ts';
+import { createBrowserPool } from '../lib/screenshot.ts';
+import { startServer } from '../lib/server.ts';
 
 interface JsonFlagOptions {
   json?: boolean;
@@ -238,20 +239,22 @@ program
 
 program
   .command('init')
-  .description('Initialize component-canvas config and directories (placeholder).')
+  .description('Initialize component-canvas config and sample workflow files.')
   .option('--json', 'Output machine-readable JSON')
   .action(async (options: InitCommandOptions, command: Command) => {
     await runCommand(command, async () => {
-      const payload = {
-        status: 'not-implemented',
-        message: 'Init command is wired up as a placeholder. Full init logic lands in task 11.'
-      };
+      const result = await initProject(process.cwd());
 
       if (options.json) {
-        writeJson(payload);
-      } else {
-        process.stdout.write(`${payload.message}\n`);
+        writeJson({
+          config: result.config,
+          canvasDir: result.canvasDir,
+          detected: result.detected
+        });
+        return;
       }
+
+      process.stdout.write(`${formatInitSummary(result)}\n`);
     });
   });
 
@@ -487,6 +490,31 @@ function formatWorkflowTable(workflows: WorkflowSummary[]): string {
   return [formatRow(headers), formatRow(widths.map((width) => '-'.repeat(width))), ...rows.map(formatRow)].join(
     '\n'
   );
+}
+
+function formatInitSummary(result: InitProjectResult): string {
+  const lines = ['Initialized component-canvas.'];
+
+  if (result.created.length > 0) {
+    lines.push('', 'Created:');
+
+    for (const entry of result.created) {
+      lines.push(`- ${entry}`);
+    }
+  } else {
+    lines.push('', 'Nothing new was created. Existing files were left unchanged.');
+  }
+
+  lines.push('', 'Detected project features:');
+  lines.push(`- src/lib: ${result.detected.lib ? 'yes' : 'no'}`);
+  lines.push(`- tailwind.config.*: ${result.detected.tailwind ? 'yes' : 'no'}`);
+  lines.push(`- svelte.config.js: ${result.svelteConfig ? 'yes' : 'no'}`);
+
+  if (result.config === null) {
+    lines.push('', 'No canvas.config.ts was created because no project-mode features were detected.');
+  }
+
+  return lines.join('\n');
 }
 
 function assertManifestSuccess(errors: ManifestError[]): void {

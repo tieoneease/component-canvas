@@ -1,6 +1,7 @@
-export * from './config.js';
-export * from './manifest.js';
-export * from './screenshot.js';
-export * from './server.js';
-export { default as canvasVitePlugin } from './vite-plugin.js';
-export type { CanvasVitePluginOptions } from './vite-plugin.js';
+export * from './config.ts';
+export * from './init.ts';
+export * from './manifest.ts';
+export * from './screenshot.ts';
+export * from './server.ts';
+export { default as canvasVitePlugin } from './vite-plugin.ts';
+export type { CanvasVitePluginOptions } from './vite-plugin.ts';

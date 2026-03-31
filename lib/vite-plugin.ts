@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import tailwindcss from 'tailwindcss';
 import { normalizePath, type Alias, type Plugin, type UserConfig, type ViteDevServer } from 'vite';
 
-import { parseWorkflowManifests } from './manifest.js';
+import { parseWorkflowManifests } from './manifest.ts';
 
 export interface CanvasVitePluginOptions {
   canvasDir: string;
