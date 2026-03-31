@@ -3,10 +3,10 @@
 import { constants } from 'node:fs';
 import { access, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
 
 import { Command, InvalidArgumentError } from 'commander';
 
+import { CANVAS_CONFIG_FILE_NAME, loadConfig, type CanvasConfig } from '../lib/config.js';
 import {
   parseWorkflowManifests,
   type ManifestError,
@@ -32,15 +32,6 @@ interface ScreenshotCommandOptions extends JsonFlagOptions {
 }
 
 interface InitCommandOptions extends JsonFlagOptions {}
-
-interface CanvasConfig {
-  canvasDir?: string;
-  lib?: string;
-  tailwind?: string;
-  globalCss?: string;
-  mocks?: Record<string, string>;
-  aliases?: Record<string, string>;
-}
 
 interface ProjectContext {
   cwd: string;
@@ -305,13 +296,13 @@ async function resolveProjectContext(
   let currentDir = cwd;
 
   while (true) {
-    const configPath = join(currentDir, 'canvas.config.ts');
+    const configPath = join(currentDir, CANVAS_CONFIG_FILE_NAME);
     const defaultCanvasDir = join(currentDir, '.canvas');
     const hasConfig = await fileExists(configPath);
     const hasCanvas = await directoryExists(defaultCanvasDir);
 
     if (hasConfig || hasCanvas) {
-      const config = hasConfig ? await loadCanvasConfig(configPath) : null;
+      const config = hasConfig ? await loadConfig(currentDir) : null;
       const canvasDir = resolveCanvasDir(currentDir, config);
 
       if (options.requireCanvas && !(await directoryExists(canvasDir))) {
@@ -359,34 +350,6 @@ async function resolveProjectContext(
   };
 }
 
-async function loadCanvasConfig(configPath: string): Promise<CanvasConfig> {
-  let module: unknown;
-
-  try {
-    const configUrl = pathToFileURL(configPath);
-    const metadata = await stat(configPath);
-    configUrl.searchParams.set('t', String(metadata.mtimeMs));
-    module = await import(configUrl.href);
-  } catch (error) {
-    throw new CliError(`Failed to load ${displayPath(configPath)}: ${getErrorMessage(error)}`);
-  }
-
-  const config = getDefaultExport(module);
-
-  if (!isPlainObject(config)) {
-    throw new CliError(`${displayPath(configPath)} must default export an object.`);
-  }
-
-  validateOptionalString(config, 'canvasDir', configPath);
-  validateOptionalString(config, 'lib', configPath);
-  validateOptionalString(config, 'tailwind', configPath);
-  validateOptionalString(config, 'globalCss', configPath);
-  validateOptionalStringRecord(config, 'mocks', configPath);
-  validateOptionalStringRecord(config, 'aliases', configPath);
-
-  return config as CanvasConfig;
-}
-
 function resolveCanvasDir(projectRoot: string, config: CanvasConfig | null): string {
   const configuredCanvasDir = config?.canvasDir;
 
@@ -400,23 +363,10 @@ function resolveCanvasDir(projectRoot: string, config: CanvasConfig | null): str
 function toServerOptions(context: ProjectContext): {
   canvasDir: string;
   projectRoot: string;
-  aliases?: Record<string, string>;
-  mocks?: Record<string, string>;
-  tailwindConfig?: string;
-  globalCss?: string;
 } {
-  const aliases = {
-    ...(context.config?.aliases ?? {}),
-    ...(context.config?.lib ? { '$lib': context.config.lib } : {})
-  };
-
   return {
     canvasDir: context.canvasDir,
-    projectRoot: context.projectRoot,
-    aliases: Object.keys(aliases).length > 0 ? aliases : undefined,
-    mocks: context.config?.mocks,
-    tailwindConfig: context.config?.tailwind,
-    globalCss: context.config?.globalCss
+    projectRoot: context.projectRoot
   };
 }
 
@@ -661,50 +611,6 @@ function displayPath(path: string): string {
   }
 
   return path;
-}
-
-function validateOptionalString(
-  config: Record<string, unknown>,
-  key: keyof CanvasConfig,
-  configPath: string
-): void {
-  const value = config[key];
-
-  if (value !== undefined && typeof value !== 'string') {
-    throw new CliError(`${displayPath(configPath)} field "${String(key)}" must be a string when provided.`);
-  }
-}
-
-function validateOptionalStringRecord(
-  config: Record<string, unknown>,
-  key: 'mocks' | 'aliases',
-  configPath: string
-): void {
-  const value = config[key];
-
-  if (value === undefined) {
-    return;
-  }
-
-  if (!isPlainObject(value)) {
-    throw new CliError(`${displayPath(configPath)} field "${key}" must be an object when provided.`);
-  }
-
-  for (const [entryKey, entryValue] of Object.entries(value)) {
-    if (typeof entryValue !== 'string') {
-      throw new CliError(
-        `${displayPath(configPath)} field "${key}.${entryKey}" must be a string.`
-      );
-    }
-  }
-}
-
-function getDefaultExport(module: unknown): unknown {
-  if (isPlainObject(module) && 'default' in module) {
-    return module.default;
-  }
-
-  return undefined;
 }
 
 function isManifestError(value: unknown): value is ManifestError {

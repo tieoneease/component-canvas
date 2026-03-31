@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 import { createServer, type ViteDevServer } from 'vite';
 
+import { loadConfig, type CanvasConfig } from './config.js';
 import canvasVitePlugin from './vite-plugin.js';
 
 export interface ServerOptions {
@@ -30,8 +31,13 @@ const DISABLE_TAILWIND_FALLBACK_ENV = 'COMPONENT_CANVAS_DISABLE_TAILWIND_FALLBAC
 export async function startServer(options: ServerOptions): Promise<StartedServer> {
   const resolvedCanvasDir = resolve(options.canvasDir);
   const resolvedProjectRoot = resolve(options.projectRoot ?? dirname(resolvedCanvasDir));
-  const resolvedGlobalCss = resolveAllowPath(options.globalCss, resolvedProjectRoot);
-  const resolvedTailwindConfig = options.tailwindConfig ?? appTailwindConfigFile;
+  const projectConfig = await loadConfig(resolvedProjectRoot);
+  const resolvedAliases = mergeAliases(projectConfig, options.aliases);
+  const resolvedMocks = mergeStringMaps(projectConfig?.mocks, options.mocks);
+  const configuredGlobalCss = options.globalCss ?? projectConfig?.globalCss;
+  const resolvedGlobalCss = resolveAllowPath(configuredGlobalCss, resolvedProjectRoot);
+  const resolvedTailwindConfig =
+    options.tailwindConfig ?? projectConfig?.tailwind ?? appTailwindConfigFile;
   const restoreEnvironment = applyServerEnvironment(resolvedProjectRoot);
 
   let server: ViteDevServer | undefined;
@@ -43,10 +49,12 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
       configFile: appConfigFile,
       plugins: [
         canvasVitePlugin({
-          ...options,
           canvasDir: resolvedCanvasDir,
           projectRoot: resolvedProjectRoot,
-          tailwindConfig: resolvedTailwindConfig
+          aliases: resolvedAliases,
+          mocks: resolvedMocks,
+          tailwindConfig: resolvedTailwindConfig,
+          globalCss: configuredGlobalCss
         })
       ],
       server: {
@@ -121,6 +129,31 @@ function resolveAllowPath(value: string | undefined, baseDir: string): string | 
   }
 
   return undefined;
+}
+
+function mergeAliases(
+  projectConfig: CanvasConfig | null,
+  explicitAliases: Record<string, string> | undefined
+): Record<string, string> | undefined {
+  const aliases = {
+    ...(projectConfig?.aliases ?? {}),
+    ...(projectConfig?.lib ? { '$lib': projectConfig.lib } : {}),
+    ...(explicitAliases ?? {})
+  };
+
+  return Object.keys(aliases).length > 0 ? aliases : undefined;
+}
+
+function mergeStringMaps(
+  base: Record<string, string> | undefined,
+  overrides: Record<string, string> | undefined
+): Record<string, string> | undefined {
+  const merged = {
+    ...(base ?? {}),
+    ...(overrides ?? {})
+  };
+
+  return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
 function uniquePaths(paths: Array<string | undefined>): string[] {
