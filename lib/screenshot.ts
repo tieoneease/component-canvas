@@ -93,7 +93,18 @@ async function captureWithBrowser(browser: Browser, options: ScreenshotOptions):
     }
 
     if (options.selector) {
-      await page.locator(options.selector).first().screenshot({
+      const locator = page.locator(options.selector).first();
+
+      // Expand viewport to fit the full element (handles scrollable overflow)
+      const box = await locator.evaluate((el) => {
+        const rect = el.getBoundingClientRect();
+        return { width: Math.ceil(el.scrollWidth || rect.width), height: Math.ceil(el.scrollHeight || rect.height) };
+      });
+      const padded = { width: Math.max(viewport.width, box.width + 100), height: Math.max(viewport.height, box.height + 200) };
+      await page.setViewportSize(padded);
+      await page.waitForTimeout(200);
+
+      await locator.screenshot({
         path: outputPath,
         type: 'png',
         animations: 'disabled'

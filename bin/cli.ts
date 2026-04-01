@@ -184,7 +184,6 @@ program
       const manifestResult = await parseWorkflowManifests(context.canvasDir);
       assertManifestSuccess(manifestResult.errors);
 
-      const targets = resolveScreenshotTargets(manifestResult.workflows, workflow, options);
       const outputRoot = resolveScreenshotOutputRoot(context, options.output);
       const server = await acquireServer(context);
       const browserPool = await createBrowserPool();
@@ -192,28 +191,39 @@ program
       try {
         const screenshots: ScreenshotOutput[] = [];
 
-        for (const target of targets) {
-          const workflowUrl = `${server.url}#/workflow/${encodeURIComponent(target.workflow.id)}`;
-          const outputPath = join(
-            outputRoot,
-            sanitizePathSegment(target.workflow.id),
-            `${sanitizePathSegment(target.screenId)}.png`
-          );
-          const selector = `[data-screen-id="${escapeAttributeValue(target.screenId)}"]`;
+        if (options.screen) {
+          // Single screen: isolated full-viewport render (no device chrome)
+          const wf = manifestResult.workflows.find((w) => w.id === workflow);
+          if (!wf) throw new CliError(`Workflow "${workflow}" was not found.`);
+          const screen = wf.screens.find((s) => s.id === options.screen);
+          if (!screen) throw new CliError(`Screen "${options.screen}" not found in workflow "${wf.id}".`);
+
+          const screenUrl = `${server.url}#/screen/${encodeURIComponent(wf.id)}/${encodeURIComponent(screen.id)}`;
+          const outputPath = join(outputRoot, sanitizePathSegment(wf.id), `${sanitizePathSegment(screen.id)}.png`);
           const result = await browserPool.capture({
-            url: workflowUrl,
-            selector,
-            waitForSelector: selector,
+            url: screenUrl,
+            waitForSelector: `[data-isolated-screen="${escapeAttributeValue(screen.id)}"]`,
             outputPath
           });
+          screenshots.push({ workflow: wf.id, screen: screen.id, path: result.path, width: result.width, height: result.height });
+        } else {
+          // Workflow-level or --all: capture the full workflow canvas for each workflow
+          const targetWorkflows = options.all
+            ? manifestResult.workflows
+            : [manifestResult.workflows.find((w) => w.id === workflow) ?? (() => { throw new CliError(`Workflow "${workflow}" was not found.`); })()];
 
-          screenshots.push({
-            workflow: target.workflow.id,
-            screen: target.screenId,
-            path: result.path,
-            width: result.width,
-            height: result.height
-          });
+          for (const wf of targetWorkflows) {
+            const workflowUrl = `${server.url}#/workflow/${encodeURIComponent(wf.id)}`;
+            const outputPath = join(outputRoot, `${sanitizePathSegment(wf.id)}.png`);
+            const canvasSelector = `[data-workflow-id="${escapeAttributeValue(wf.id)}"]`;
+            const result = await browserPool.capture({
+              url: workflowUrl,
+              selector: canvasSelector,
+              waitForSelector: canvasSelector,
+              outputPath
+            });
+            screenshots.push({ workflow: wf.id, screen: '*', path: result.path, width: result.width, height: result.height });
+          }
         }
 
         if (options.json) {
@@ -227,9 +237,8 @@ program
         }
 
         for (const screenshot of screenshots) {
-          process.stdout.write(
-            `${screenshot.workflow}/${screenshot.screen} -> ${displayPath(screenshot.path)}\n`
-          );
+          const label = screenshot.screen === '*' ? screenshot.workflow : `${screenshot.workflow}/${screenshot.screen}`;
+          process.stdout.write(`${label} -> ${displayPath(screenshot.path)}\n`);
         }
       } finally {
         await Promise.all([browserPool.close(), server.close()]);
@@ -528,33 +537,6 @@ function assertManifestSuccess(errors: ManifestError[]): void {
   );
 }
 
-function resolveScreenshotTargets(
-  workflows: WorkflowManifest[],
-  workflowId: string | undefined,
-  options: ScreenshotCommandOptions
-): ScreenshotTarget[] {
-  if (options.all) {
-    return workflows.flatMap((workflow) => workflow.screens.map((screen) => ({ workflow, screenId: screen.id })));
-  }
-
-  const workflow = workflows.find((entry) => entry.id === workflowId);
-
-  if (!workflow) {
-    throw new CliError(`Workflow "${workflowId}" was not found.`);
-  }
-
-  if (options.screen) {
-    const screen = workflow.screens.find((entry) => entry.id === options.screen);
-
-    if (!screen) {
-      throw new CliError(`Screen "${options.screen}" was not found in workflow "${workflow.id}".`);
-    }
-
-    return [{ workflow, screenId: screen.id }];
-  }
-
-  return workflow.screens.map((screen) => ({ workflow, screenId: screen.id }));
-}
 
 function resolveScreenshotOutputRoot(context: ProjectContext, output?: string): string {
   if (output) {

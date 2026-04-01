@@ -117,28 +117,23 @@ describe('component-canvas acceptance workflow', () => {
         }
       ]);
 
+      // Workflow-level screenshot: captures entire canvas (all screens + arrows)
       const signupScreenshotPayload = await runJsonCli<ScreenshotCommandPayload>(projectRoot, [
         'screenshot',
         'signup',
         '--json'
       ]);
-      const signupScreenshots = sortScreenshots(signupScreenshotPayload.screenshots);
 
-      expect(signupScreenshots.map(({ workflow, screen, path }) => ({ workflow, screen, path }))).toEqual([
-        {
-          workflow: 'signup',
-          screen: 'signup-form',
-          path: resolve(canvasRealPath, 'screenshots', 'signup', 'signup-form.png')
-        },
-        {
-          workflow: 'signup',
-          screen: 'welcome',
-          path: resolve(canvasRealPath, 'screenshots', 'signup', 'welcome.png')
-        }
-      ]);
-      await assertScreenshotOutputs(signupScreenshots);
+      expect(signupScreenshotPayload.screenshots).toHaveLength(1);
+      expect(signupScreenshotPayload.screenshots[0].workflow).toBe('signup');
+      expect(signupScreenshotPayload.screenshots[0].screen).toBe('*');
+      expect(signupScreenshotPayload.screenshots[0].path).toBe(
+        resolve(canvasRealPath, 'screenshots', 'signup.png')
+      );
+      await assertScreenshotOutputs(signupScreenshotPayload.screenshots);
       expect(await isUrlReachable(devUrl)).toBe(true);
 
+      // --all captures each workflow as one canvas image
       const allScreenshotPayload = await runJsonCli<ScreenshotCommandPayload>(projectRoot, [
         'screenshot',
         '--all',
@@ -146,23 +141,9 @@ describe('component-canvas acceptance workflow', () => {
       ]);
       const allScreenshots = sortScreenshots(allScreenshotPayload.screenshots);
 
-      expect(allScreenshots.map(({ workflow, screen, path }) => ({ workflow, screen, path }))).toEqual([
-        {
-          workflow: 'example',
-          screen: 'example-screen',
-          path: resolve(canvasRealPath, 'screenshots', 'example', 'example-screen.png')
-        },
-        {
-          workflow: 'signup',
-          screen: 'signup-form',
-          path: resolve(canvasRealPath, 'screenshots', 'signup', 'signup-form.png')
-        },
-        {
-          workflow: 'signup',
-          screen: 'welcome',
-          path: resolve(canvasRealPath, 'screenshots', 'signup', 'welcome.png')
-        }
-      ]);
+      expect(allScreenshots).toHaveLength(2);
+      expect(allScreenshots.map(({ workflow }) => workflow)).toEqual(['example', 'signup']);
+      expect(allScreenshots.every(({ screen }) => screen === '*')).toBe(true);
       await assertScreenshotOutputs(allScreenshots);
       expect(await isUrlReachable(devUrl)).toBe(true);
 

@@ -34,10 +34,19 @@
 
   let viewport = $derived(VIEWPORTS[viewportId] ?? VIEWPORTS.desktop);
   let selectedWorkflow = $derived(
-    route.type === 'workflow'
+    route.type === 'workflow' || route.type === 'screen'
       ? workflowList.find((workflow) => workflow.id === route.workflowId) ?? null
       : null
   );
+  let isolatedScreen = $derived.by(() => {
+    if (route.type !== 'screen' || !selectedWorkflow) return null;
+    return selectedWorkflow.screens.find((s) => s.id === route.screenId) ?? null;
+  });
+  let isolatedComponent = $derived.by(() => {
+    if (!isolatedScreen || !selectedWorkflow) return null;
+    const key = `${selectedWorkflow.id}/${isolatedScreen.component.replace(/\.svelte$/u, '')}`;
+    return registry[key] ?? null;
+  });
   let totalScreens = $derived(
     workflowList.reduce((count, workflow) => count + workflow.screens.length, 0)
   );
@@ -99,6 +108,16 @@
       return {
         type: 'workflow',
         workflowId: decodeURIComponent(workflowMatch[1])
+      };
+    }
+
+    const screenMatch = normalizedHash.match(/^\/screen\/([^/]+)\/([^/]+)$/u);
+
+    if (screenMatch) {
+      return {
+        type: 'screen',
+        workflowId: decodeURIComponent(screenMatch[1]),
+        screenId: decodeURIComponent(screenMatch[2])
       };
     }
 
@@ -196,6 +215,20 @@
   <main class="app-main">
     {#if route.type === 'overview'}
       <Overview workflows={workflowList} components={registry} viewport={viewport} />
+    {:else if route.type === 'screen'}
+      {#if isolatedScreen && isolatedComponent}
+        {#each [isolatedComponent] as IsolatedComp}
+          <div class="isolated-screen" data-isolated-screen={isolatedScreen.id}>
+            <IsolatedComp {...(isolatedScreen.props ?? {})} />
+          </div>
+        {/each}
+      {:else}
+        <section class="panel panel--empty">
+          <h2>Screen not found</h2>
+          <p>Could not resolve screen <code>{route.screenId}</code> in workflow <code>{route.workflowId}</code>.</p>
+          <a href="#/">Return to overview</a>
+        </section>
+      {/if}
     {:else if route.type === 'workflow'}
       {#if selectedWorkflow}
         <Workflow workflow={selectedWorkflow} components={registry} viewport={viewport} />
@@ -461,6 +494,18 @@
   .issue-list strong {
     font-size: 0.9rem;
     word-break: break-all;
+  }
+
+  .isolated-screen {
+    position: fixed;
+    inset: 0;
+    overflow: auto;
+    background: #ffffff;
+    z-index: 9999;
+  }
+
+  :global(html.dark) .isolated-screen {
+    background: #0f172a;
   }
 
   .panel--empty {
