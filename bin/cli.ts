@@ -6,6 +6,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { Command, InvalidArgumentError } from 'commander';
 
 import { CANVAS_CONFIG_FILE_NAME, loadConfig, type CanvasConfig } from '../lib/config.ts';
+import { extractComponentAPI, type ComponentAPI, type PropInfo } from '../lib/explore.ts';
 import { initProject, type InitProjectResult } from '../lib/init.ts';
 import {
   parseWorkflowManifests,
@@ -32,6 +33,8 @@ interface DevCommandOptions extends JsonFlagOptions {
 }
 
 interface ListCommandOptions extends JsonFlagOptions {}
+
+interface ExploreCommandOptions extends JsonFlagOptions {}
 
 interface ScreenshotCommandOptions extends JsonFlagOptions {
   screen?: string;
@@ -162,6 +165,24 @@ program
 
       process.stdout.write(formatWorkflowTable(summaries));
       process.stdout.write('\n');
+    });
+  });
+
+program
+  .command('explore')
+  .description('Extract props, events, and snippets from a Svelte component.')
+  .argument('<path>', 'Path to a .svelte component file')
+  .option('--json', 'Output machine-readable JSON')
+  .action(async (componentPath: string, options: ExploreCommandOptions, command: Command) => {
+    await runCommand(command, async () => {
+      const api = await extractComponentAPI(resolve(process.cwd(), componentPath));
+
+      if (options.json) {
+        writeJson(api);
+        return;
+      }
+
+      process.stdout.write(`${formatComponentAPI(api, componentPath)}\n`);
     });
   });
 
@@ -536,6 +557,37 @@ function formatWorkflowTable(workflows: WorkflowSummary[]): string {
       String(workflow.transitions),
       String(workflow.variants)
     ])
+  );
+}
+
+function formatComponentAPI(api: ComponentAPI, filePath: string): string {
+  const lines = [`Component API: ${displayPath(resolve(process.cwd(), filePath))}`];
+  const totalEntries = api.props.length + api.events.length + api.snippets.length;
+
+  if (totalEntries === 0) {
+    lines.push('', 'No props, events, or snippets found.');
+    return lines.join('\n');
+  }
+
+  appendComponentAPISection(lines, 'Props', api.props);
+  appendComponentAPISection(lines, 'Events', api.events);
+  appendComponentAPISection(lines, 'Snippets', api.snippets);
+
+  return lines.join('\n');
+}
+
+function appendComponentAPISection(lines: string[], title: string, entries: PropInfo[]): void {
+  if (entries.length === 0) {
+    return;
+  }
+
+  lines.push('');
+  lines.push(title);
+  lines.push(
+    formatTable(
+      ['NAME', 'TYPE', 'REQUIRED', 'DEFAULT'],
+      entries.map((entry) => [entry.name, entry.type, entry.required ? 'yes' : 'no', entry.default ?? ''])
+    )
   );
 }
 
