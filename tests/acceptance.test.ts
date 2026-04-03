@@ -85,7 +85,7 @@ describe('component-canvas acceptance workflow', () => {
       const projectRoot = await mkdtemp(join(tmpdir(), 'component-canvas-acceptance-'));
       tempDirs.push(projectRoot);
 
-      const initPayload = await runJsonCli<{ config: string | null; canvasDir: string; detected: { lib: boolean } }>(
+      const initPayload = await runJsonCli<{ config: string | null; canvasDir: string; detected: Record<string, never> }>(
         projectRoot,
         ['init', '--json']
       );
@@ -93,10 +93,9 @@ describe('component-canvas acceptance workflow', () => {
       expect(initPayload).toEqual({
         config: null,
         canvasDir: '.canvas/',
-        detected: {
-          lib: false
-        }
+        detected: {}
       });
+      await expect(access(resolve(projectRoot, '.canvas', 'AGENTS.md'))).resolves.toBeUndefined();
       await expect(access(resolve(projectRoot, '.canvas', 'workflows', 'example', '_flow.ts'))).resolves.toBeUndefined();
       await expect(
         access(resolve(projectRoot, '.canvas', 'workflows', 'example', 'ExampleScreen.svelte'))

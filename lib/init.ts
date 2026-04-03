@@ -1,11 +1,9 @@
 import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
-import { CANVAS_CONFIG_FILE_NAME, type CanvasConfig } from './config.ts';
+import { CANVAS_CONFIG_FILE_NAME } from './config.ts';
 
-export interface InitDetection {
-  lib: boolean;
-}
+export type InitDetection = Record<string, never>;
 
 export interface InitProjectResult {
   config: string | null;
@@ -17,14 +15,20 @@ export interface InitProjectResult {
 
 interface ProjectStructureDetection {
   detected: InitDetection;
-  config: CanvasConfig;
   svelteConfig: boolean;
 }
 
 const CANVAS_DIR = '.canvas/';
+const CANVAS_AGENTS_PATH = '.canvas/AGENTS.md';
 const EXAMPLE_WORKFLOW_DIR = '.canvas/workflows/example/';
 const EXAMPLE_FLOW_PATH = '.canvas/workflows/example/_flow.ts';
 const EXAMPLE_SCREEN_PATH = '.canvas/workflows/example/ExampleScreen.svelte';
+const SVELTE_CONFIG_FILES = [
+  'svelte.config.js',
+  'svelte.config.mjs',
+  'svelte.config.cjs',
+  'svelte.config.ts'
+] as const;
 
 export async function initProject(cwd: string): Promise<InitProjectResult> {
   const projectRoot = resolve(cwd);
@@ -32,21 +36,21 @@ export async function initProject(cwd: string): Promise<InitProjectResult> {
   const created: string[] = [];
 
   await ensureDirectory(resolve(projectRoot, '.canvas'), CANVAS_DIR, created);
+  await writeFileIfMissing(
+    resolve(projectRoot, CANVAS_AGENTS_PATH),
+    createCanvasAgentsSource(),
+    CANVAS_AGENTS_PATH,
+    created
+  );
   await ensureDirectory(resolve(projectRoot, '.canvas', 'workflows', 'example'), EXAMPLE_WORKFLOW_DIR, created);
   await writeFileIfMissing(resolve(projectRoot, EXAMPLE_FLOW_PATH), createExampleFlowSource(), EXAMPLE_FLOW_PATH, created);
   await writeFileIfMissing(resolve(projectRoot, EXAMPLE_SCREEN_PATH), createExampleScreenSource(), EXAMPLE_SCREEN_PATH, created);
 
   const configPath = resolve(projectRoot, CANVAS_CONFIG_FILE_NAME);
-  const shouldCreateConfig = detection.detected.lib;
   const hasExistingConfig = await fileExists(configPath);
 
-  if (shouldCreateConfig && !hasExistingConfig) {
-    await writeFile(configPath, renderCanvasConfig(detection.config), 'utf8');
-    created.unshift(CANVAS_CONFIG_FILE_NAME);
-  }
-
   return {
-    config: shouldCreateConfig || hasExistingConfig ? CANVAS_CONFIG_FILE_NAME : null,
+    config: hasExistingConfig ? CANVAS_CONFIG_FILE_NAME : null,
     canvasDir: CANVAS_DIR,
     detected: detection.detected,
     created,
@@ -55,14 +59,9 @@ export async function initProject(cwd: string): Promise<InitProjectResult> {
 }
 
 async function detectProjectStructure(projectRoot: string): Promise<ProjectStructureDetection> {
-  const hasLib = await directoryExists(resolve(projectRoot, 'src', 'lib'));
-  const hasSvelteConfig = await fileExists(resolve(projectRoot, 'svelte.config.js'));
-  const config: CanvasConfig = {};
-
   return {
-    detected: { lib: hasLib },
-    config,
-    svelteConfig: hasSvelteConfig
+    detected: {},
+    svelteConfig: await anyFileExists(projectRoot, SVELTE_CONFIG_FILES)
   };
 }
 
@@ -78,15 +77,28 @@ async function writeFileIfMissing(path: string, content: string, displayPath: st
   created.push(displayPath);
 }
 
-function renderCanvasConfig(config: CanvasConfig): string {
-  const entries = Object.entries(config);
-  if (entries.length === 0) return 'export default {}\n';
-  const lines = ['export default {'];
-  for (const [key, value] of entries) {
-    lines.push(`  ${key}: '${value.replace(/\\/gu, '\\\\').replace(/'/gu, "\\'")}',`);
-  }
-  lines.push('};', '');
-  return lines.join('\n');
+function createCanvasAgentsSource(): string {
+  return `# component-canvas
+
+## Architecture
+
+- Workflows live in \`.canvas/workflows/<workflow>/\` with a \`_flow.ts\` manifest and screen components.
+- The canvas shell is prebuilt UI. Screen previews render in separate iframes so they use the project's own Svelte + Vite runtime.
+- The preview server loads the project's \`vite.config.ts\` automatically, so aliases, plugins, and global CSS belong there.
+
+## Config
+
+- \`canvas.config.ts\` is optional.
+- Only add it when you need:
+  - \`mocks\` to replace imports during previews
+  - \`purity\` to enforce visual-component boundaries
+- \`canvas.config.ts\` no longer accepts \`lib\`, aliases, or global CSS settings.
+
+## Commands
+
+- \`component-canvas explore <path>\` extracts props, \`on*\` callbacks, and snippets from a component.
+- \`component-canvas render <path> --props '{...}'\` creates an ephemeral live preview URL for a component state.
+`;
 }
 
 function createExampleFlowSource(): string {
@@ -136,6 +148,16 @@ function createExampleScreenSource(): string {
   p { margin: 0; color: #475569; line-height: 1.5; }
 </style>
 `;
+}
+
+async function anyFileExists(projectRoot: string, fileNames: readonly string[]): Promise<boolean> {
+  for (const fileName of fileNames) {
+    if (await fileExists(resolve(projectRoot, fileName))) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 async function fileExists(path: string): Promise<boolean> {

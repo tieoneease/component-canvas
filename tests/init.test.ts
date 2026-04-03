@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from 'node:child_process';
-import { access, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -15,7 +15,7 @@ afterEach(async () => {
 });
 
 describe('component-canvas init', () => {
-  it('creates an empty canvas.config.ts and sample workflow files when project features are detected', async () => {
+  it('creates the .canvas scaffold and AGENTS guidance without generating canvas.config.ts by default', async () => {
     const projectRoot = await mkdtemp(join(tmpdir(), 'component-canvas-init-project-'));
     tempDirs.push(projectRoot);
 
@@ -25,21 +25,31 @@ describe('component-canvas init', () => {
       cwd: projectRoot
     });
     const payload = JSON.parse(stdout);
-    const configSource = await readFile(resolve(projectRoot, 'canvas.config.ts'), 'utf8');
+    const agentsSource = await readFile(resolve(projectRoot, '.canvas', 'AGENTS.md'), 'utf8');
 
     expect(stderr).toBe('');
     expect(payload).toEqual({
-      config: 'canvas.config.ts',
+      config: null,
       canvasDir: '.canvas/',
-      detected: { lib: true }
+      detected: {}
     });
-    expect(configSource).toBe('export default {}\n');
+    expect(agentsSource).toContain('canvas.config.ts');
+    expect(agentsSource).toContain('vite.config.ts');
+    expect(agentsSource).toContain('component-canvas explore <path>');
+    expect(agentsSource).toContain("component-canvas render <path> --props '{...}'");
     await expect(access(resolve(projectRoot, '.canvas', 'workflows', 'example', '_flow.ts'))).resolves.toBeUndefined();
+    await expect(access(resolve(projectRoot, '.canvas', 'workflows', 'example', 'ExampleScreen.svelte'))).resolves.toBeUndefined();
+    await expect(access(resolve(projectRoot, 'canvas.config.ts'))).rejects.toThrow();
   });
 
-  it('creates only the .canvas scaffold in standalone directories', async () => {
-    const projectRoot = await mkdtemp(join(tmpdir(), 'component-canvas-init-standalone-'));
+  it('preserves an existing canvas.config.ts and reports it in json output', async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), 'component-canvas-init-existing-config-'));
     tempDirs.push(projectRoot);
+
+    const existingConfig = ['export default {', "  mocks: { '@api/client': './src/mocks/api-client.ts' }", '};', ''].join(
+      '\n'
+    );
+    await writeFile(resolve(projectRoot, 'canvas.config.ts'), existingConfig, 'utf8');
 
     const { stdout, stderr } = await execFile('npx', ['tsx', cliPath, 'init', '--json'], {
       cwd: projectRoot
@@ -48,11 +58,11 @@ describe('component-canvas init', () => {
 
     expect(stderr).toBe('');
     expect(payload).toEqual({
-      config: null,
+      config: 'canvas.config.ts',
       canvasDir: '.canvas/',
-      detected: { lib: false }
+      detected: {}
     });
-    await expect(access(resolve(projectRoot, '.canvas', 'workflows', 'example', '_flow.ts'))).resolves.toBeUndefined();
-    await expect(access(resolve(projectRoot, 'canvas.config.ts'))).rejects.toThrow();
+    await expect(access(resolve(projectRoot, '.canvas', 'AGENTS.md'))).resolves.toBeUndefined();
+    expect(await readFile(resolve(projectRoot, 'canvas.config.ts'), 'utf8')).toBe(existingConfig);
   });
 });

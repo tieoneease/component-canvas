@@ -338,7 +338,7 @@ program
 
 program
   .command('init')
-  .description('Initialize component-canvas config and sample workflow files.')
+  .description('Initialize the component-canvas scaffold and sample workflow files.')
   .option('--json', 'Output machine-readable JSON')
   .action(async (options: InitCommandOptions, command: Command) => {
     await runCommand(command, async () => {
@@ -865,12 +865,17 @@ function formatInitSummary(result: InitProjectResult): string {
     lines.push('', 'Nothing new was created. Existing files were left unchanged.');
   }
 
-  lines.push('', 'Detected project features:');
-  lines.push(`- src/lib: ${result.detected.lib ? 'yes' : 'no'}`);
-  lines.push(`- svelte.config.js: ${result.svelteConfig ? 'yes' : 'no'}`);
+  lines.push('', "Your project's vite.config.ts will be loaded automatically for previews.");
+  lines.push('See .canvas/AGENTS.md for architecture notes and explore/render usage.');
+
+  if (result.svelteConfig) {
+    lines.push('Detected svelte.config.* in this project.');
+  }
 
   if (result.config === null) {
-    lines.push('', 'No canvas.config.ts was created because no project-mode features were detected.');
+    lines.push('', 'canvas.config.ts is optional and was not created. Add it later only if you need mocks or purity rules.');
+  } else if (!result.created.includes(CANVAS_CONFIG_FILE_NAME)) {
+    lines.push('', 'Existing canvas.config.ts was left unchanged.');
   }
 
   return lines.join('\n');
