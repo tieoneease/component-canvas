@@ -13,6 +13,12 @@ import {
 
 import { SvelteAdapter, type ComponentEntry, type PurityConfig } from './adapter.ts';
 import {
+  getRenderIdFromResolvedModuleId,
+  RENDER_MODULE_ID_PREFIX,
+  RESOLVED_RENDER_MODULE_ID_PREFIX,
+  type RenderRegistry
+} from './render.ts';
+import {
   type ParseWorkflowManifestsResult,
   parseWorkflowManifests
 } from './manifest.ts';
@@ -32,6 +38,7 @@ export interface CanvasVitePluginOptions {
   mocks?: Record<string, string>;
   globalCss?: string;
   purity?: PurityConfig;
+  renderRegistry?: RenderRegistry;
 }
 
 const MANIFESTS_MODULE_ID = 'virtual:canvas-manifests';
@@ -105,6 +112,10 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
         return RESOLVED_PREVIEW_MODULE_ID;
       }
 
+      if (source.startsWith(RENDER_MODULE_ID_PREFIX)) {
+        return `${RESOLVED_RENDER_MODULE_ID_PREFIX}${source.slice(RENDER_MODULE_ID_PREFIX.length)}`;
+      }
+
       if (
         importer &&
         options.purity &&
@@ -145,6 +156,12 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
 
       if (id === RESOLVED_PREVIEW_MODULE_ID) {
         return loadPreviewModule();
+      }
+
+      const renderId = getRenderIdFromResolvedModuleId(id);
+
+      if (renderId !== null) {
+        return loadRenderModule(renderId, options.renderRegistry);
       }
 
       return null;
@@ -475,7 +492,7 @@ function loadPreviewModule(): string {
     '',
     'async function renderRegisteredPreview(renderId, version) {',
     '  try {',
-    '    const renderModule = await import(/* @vite-ignore */ `virtual:canvas-render-${renderId}`);',
+    '    const renderModule = await import(/* @vite-ignore */ resolveRenderModuleImportUrl(renderId));',
     '',
     '    if (version !== renderVersion || !appTarget) {',
     '      return;',
@@ -657,10 +674,24 @@ function loadPreviewModule(): string {
     '  return typeof value === "object" && value !== null && !Array.isArray(value);',
     '}',
     '',
+    'function resolveRenderModuleImportUrl(renderId) {',
+    '  return `/preview/@id/__x00__component-canvas:render-${encodeURIComponent(renderId)}`;',
+    '}',
+    '',
     'function formatError(error) {',
     '  return error instanceof Error ? error.message : String(error);',
     '}'
   ].join('\n');
+}
+
+function loadRenderModule(renderId: string, renderRegistry: RenderRegistry | undefined): string {
+  const registeredModule = renderRegistry?.get(renderId);
+
+  if (registeredModule) {
+    return registeredModule;
+  }
+
+  return `throw new Error(${JSON.stringify(`Render ${renderId} is not registered.`)});`;
 }
 
 export function isPurityViolation(

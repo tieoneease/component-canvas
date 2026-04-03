@@ -6,6 +6,11 @@ import type { Connect, InlineConfig, UserConfig, ViteDevServer } from 'vite';
 
 import { SvelteAdapter } from './adapter.ts';
 import { loadConfig } from './config.ts';
+import {
+  attachRenderRegistry,
+  createRenderAPIMiddleware,
+  createRenderRegistry
+} from './render.ts';
 import { composePreviewConfig, loadProjectViteConfig, resolvePackageEntry } from './project.ts';
 import { resolveFromProject } from './resolve-plugin.ts';
 import { getErrorMessage, pathExists } from './utils.ts';
@@ -26,6 +31,7 @@ export interface ServerOptions {
 export interface StartedServer {
   url: string;
   previewUrl: string;
+  previewServer: ViteDevServer;
   close: () => Promise<void>;
 }
 
@@ -55,6 +61,7 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
   const adapter = new SvelteAdapter();
   const canvasConfig = await loadConfig(resolvedProjectRoot);
   const resolvedMocks = mergeStringMaps(canvasConfig?.mocks, options.mocks);
+  const renderRegistry = createRenderRegistry();
   const basePreviewMiddleware = createPreviewMiddleware();
   const sseMiddleware = createSSEMiddleware(resolvedCanvasDir);
   const manifestsApiMiddleware = createManifestsAPIMiddleware(resolvedCanvasDir);
@@ -78,7 +85,8 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
         projectRoot: resolvedProjectRoot,
         aliases: projectAliases,
         mocks: resolvedMocks,
-        purity: canvasConfig?.purity ?? adapter.defaultPurityRules()
+        purity: canvasConfig?.purity ?? adapter.defaultPurityRules(),
+        renderRegistry
       })
     ],
     packageResolutionFallbacks
@@ -95,6 +103,8 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
       options.logLevel,
       packageResolutionFallbacks
     );
+    attachRenderRegistry(previewServer, renderRegistry);
+    const renderApiMiddleware = createRenderAPIMiddleware(previewServer);
     const previewMiddleware = createMountedPreviewMiddleware(basePreviewMiddleware, previewServer);
     httpServer = createHttpServer((req, res) => {
       handleRequest({
@@ -104,6 +114,7 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
         previewMiddleware,
         sseMiddleware,
         manifestsApiMiddleware,
+        renderApiMiddleware,
         shellMiddleware
       });
     });
@@ -117,6 +128,7 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
     return {
       url,
       previewUrl: new URL('preview/', url).toString(),
+      previewServer: startedPreviewServer,
       close: async () => {
         if (closed) return;
         closed = true;
@@ -228,9 +240,19 @@ function handleRequest(options: {
   previewMiddleware: Middleware;
   sseMiddleware: Middleware;
   manifestsApiMiddleware: Middleware;
+  renderApiMiddleware: Middleware;
   shellMiddleware: Middleware;
 }): void {
-  const { req, res, previewServer, previewMiddleware, sseMiddleware, manifestsApiMiddleware, shellMiddleware } = options;
+  const {
+    req,
+    res,
+    previewServer,
+    previewMiddleware,
+    sseMiddleware,
+    manifestsApiMiddleware,
+    renderApiMiddleware,
+    shellMiddleware
+  } = options;
   const pathname = getRequestPath(req);
 
   if (pathname === '/preview/api/manifests/stream') {
@@ -250,6 +272,19 @@ function handleRequest(options: {
     const originalUrl = req.url;
     req.url = stripPreviewPrefix(req.url);
     invokeMiddleware(manifestsApiMiddleware, req, res, previewServer, () => {
+      req.url = originalUrl;
+
+      if (!isResponseHandled(res)) {
+        sendNotFound(res);
+      }
+    });
+    return;
+  }
+
+  if (pathname === '/preview/api/renders') {
+    const originalUrl = req.url;
+    req.url = stripPreviewPrefix(req.url);
+    invokeMiddleware(renderApiMiddleware, req, res, previewServer, () => {
       req.url = originalUrl;
 
       if (!isResponseHandled(res)) {

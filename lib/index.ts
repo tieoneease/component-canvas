@@ -5,6 +5,7 @@ export * from './init.ts';
 export * from './manifest.ts';
 export * from './render-check.ts';
 export * from './resolve-plugin.ts';
+export * from './render.ts';
 export * from './screenshot.ts';
 export * from './server.ts';
 export {
