@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -237,7 +237,9 @@ describe('resolveFromProject', () => {
 async function createNodeModulesFixture(
   packages: Record<string, PackageFixture>
 ): Promise<{ rootDir: string; nodeModulesDir: string }> {
-  const rootDir = await mkdtemp(join(tmpdir(), 'component-canvas-resolve-plugin-'));
+  const rawRootDir = await mkdtemp(join(tmpdir(), 'component-canvas-resolve-plugin-'));
+  // Dereference macOS /var → /private/var symlink so paths match realpath'd results
+  const rootDir = await realpath(rawRootDir);
   const nodeModulesDir = resolve(rootDir, 'node_modules');
 
   tempDirs.push(rootDir);

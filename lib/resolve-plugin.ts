@@ -25,12 +25,14 @@ interface ExportMatch {
 export interface ResolveFromExportsCache {
   resolutionCache: Map<string, Promise<string | null>>;
   packageMetadataCache: Map<string, Promise<PackageMetadata | null>>;
+  realpathCache: Map<string, Promise<string>>;
 }
 
 export function createResolveFromExportsCache(): ResolveFromExportsCache {
   return {
     resolutionCache: new Map<string, Promise<string | null>>(),
-    packageMetadataCache: new Map<string, Promise<PackageMetadata | null>>()
+    packageMetadataCache: new Map<string, Promise<PackageMetadata | null>>(),
+    realpathCache: new Map<string, Promise<string>>()
   };
 }
 
@@ -179,7 +181,11 @@ export async function resolveFromExports(
       return null;
     }
 
-    const packageDir = resolve(nodeModulesDir, ...parsedSpecifier.packageName.split('/'));
+    const symlinkDir = resolve(nodeModulesDir, ...parsedSpecifier.packageName.split('/'));
+    // Dereference pnpm symlinks: node_modules/svelte is a symlink to
+    // .pnpm/svelte@x.x.x/node_modules/svelte. esbuild needs real paths
+    // to correctly read files through pnpm's store structure.
+    const packageDir = await dereferencePackageDir(symlinkDir, cache);
     const packageMetadata = await loadPackageMetadata(packageDir, cache);
 
     if (!packageMetadata) {
@@ -263,6 +269,22 @@ function parsePackageSpecifier(specifier: string): ParsedSpecifier | null {
     packageName: parts[0],
     subpath: parts.length > 1 ? `./${parts.slice(1).join('/')}` : '.'
   };
+}
+
+async function dereferencePackageDir(
+  symlinkDir: string,
+  cache: ResolveFromExportsCache
+): Promise<string> {
+  const key = resolve(symlinkDir);
+  const cached = cache.realpathCache.get(key);
+
+  if (cached) {
+    return cached;
+  }
+
+  const pending = realpath(symlinkDir).catch(() => key);
+  cache.realpathCache.set(key, pending);
+  return pending;
 }
 
 async function loadPackageMetadata(
