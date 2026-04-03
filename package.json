@@ -5,10 +5,17 @@
   "bin": {
     "component-canvas": "./bin/cli.ts"
   },
+  "files": [
+    "bin",
+    "lib",
+    "shell/dist"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "build": "tsc"
+    "build": "tsc",
+    "build:shell": "vite build --config shell-src/vite.config.ts",
+    "prepublishOnly": "bun run build && bun run build:shell"
   },
   "dependencies": {
     "commander": "^14.0.1",
