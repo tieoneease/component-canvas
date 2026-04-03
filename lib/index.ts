@@ -1,5 +1,6 @@
 export * from './adapter.ts';
 export * from './config.ts';
+export * from './explore.ts';
 export * from './init.ts';
 export * from './manifest.ts';
 export * from './render-check.ts';
