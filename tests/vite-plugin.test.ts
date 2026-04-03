@@ -1,9 +1,16 @@
+import { EventEmitter } from 'node:events';
 import { resolve } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
-import type { Alias, ConfigEnv } from 'vite';
+import type { ConfigEnv } from 'vite';
 
-import canvasVitePlugin, { formatPurityError, isPurityViolation } from '../lib/vite-plugin.ts';
+import canvasVitePlugin, {
+  createManifestsAPIMiddleware,
+  createPreviewMiddleware,
+  createSSEMiddleware,
+  formatPurityError,
+  isPurityViolation
+} from '../lib/vite-plugin.ts';
 import type { PurityConfig } from '../lib/adapter.ts';
 
 const fixturesDir = resolve(process.cwd(), 'tests/fixtures');
@@ -21,7 +28,6 @@ const purityRules: PurityConfig = {
 const componentPath = `${resolve(fixturesDir, 'valid-workflow/src/lib/components')}/`;
 
 describe('isPurityViolation', () => {
-
   it('returns true when a component imports from a forbidden path', () => {
     const importer = resolve(fixturesDir, 'valid-workflow/src/lib/components/Chat.svelte');
 
@@ -114,20 +120,28 @@ describe('canvasVitePlugin', () => {
 
     const manifestsId = await plugin.resolveId?.('virtual:canvas-manifests');
     const componentsId = await plugin.resolveId?.('virtual:canvas-components');
+    const previewId = await plugin.resolveId?.('virtual:canvas-preview');
 
     expect(manifestsId).toBe('\0component-canvas:manifests');
     expect(componentsId).toBe('\0component-canvas:components');
+    expect(previewId).toBe('\0component-canvas:preview');
 
     const manifestModule = await plugin.load?.call({ warn: vi.fn() } as never, manifestsId!);
     const componentModule = await plugin.load?.call({ warn: vi.fn() } as never, componentsId!);
+    const previewModule = await plugin.load?.call({ warn: vi.fn() } as never, previewId!);
 
     expect(manifestModule).toContain('export const workflows =');
     expect(manifestModule).toContain('"id": "login"');
     expect(componentModule).toContain('login/LoginForm');
     expect(componentModule).toContain('/@fs/');
+    expect(previewModule).toContain("virtual:canvas-manifests");
+    expect(previewModule).toContain("virtual:canvas-components");
+    expect(previewModule).toContain("virtual:canvas-global-css");
+    expect(previewModule).toContain('#/screen/<workflowId>/<screenId>');
+    expect(previewModule).toContain('virtual:canvas-render-');
   });
 
-  it('adds fs allow entries, aliases, mocks, and tailwind config through the Vite config hook', () => {
+  it('adds fs allow entries through the Vite config hook without injecting aliases', () => {
     const projectRoot = resolve(fixturesDir, 'valid-workflow');
     const canvasDir = resolve(projectRoot, '.canvas');
     const plugin = canvasVitePlugin({
@@ -146,18 +160,24 @@ describe('canvasVitePlugin', () => {
 
     expect(config).toBeDefined();
     expect(config?.server?.fs?.allow).toEqual(
-      expect.arrayContaining([
-        canvasDir,
-        projectRoot,
-        resolve(projectRoot, 'src/app.css')
-      ])
+      expect.arrayContaining([canvasDir, projectRoot, resolve(projectRoot, 'src/app.css')])
     );
+    expect(config?.resolve).toBeUndefined();
+  });
 
-    const aliases = aliasArrayToMap(config?.resolve?.alias ?? []);
-    expect(aliases).toMatchObject({
-      '$app/environment': resolve(projectRoot, 'tests/mocks/app-environment.ts'),
-      '$lib': resolve(projectRoot, 'src/lib')
+  it('resolves mock aliases through resolveId', async () => {
+    const projectRoot = resolve(fixturesDir, 'valid-workflow');
+    const plugin = canvasVitePlugin({
+      canvasDir: resolve(projectRoot, '.canvas'),
+      projectRoot,
+      mocks: {
+        '$app/environment': './tests/mocks/app-environment.ts'
+      }
     });
+
+    const resolvedId = await plugin.resolveId?.('$app/environment');
+
+    expect(resolvedId).toBe(resolve(projectRoot, 'tests/mocks/app-environment.ts'));
   });
 
   it('emits a virtual global CSS module when globalCss is configured', async () => {
@@ -239,12 +259,158 @@ describe('canvasVitePlugin', () => {
   });
 });
 
-function aliasArrayToMap(alias: Alias[]): Record<string, string> {
-  return alias.reduce<Record<string, string>>((entries, entry) => {
-    if (typeof entry === 'object' && typeof entry.find === 'string') {
-      entries[entry.find] = entry.replacement;
+describe('preview middleware', () => {
+  it('serves preview HTML for extensionless GET requests', async () => {
+    const middleware = createPreviewMiddleware();
+    const req = new MockRequest('GET', '/');
+    const res = new MockResponse();
+    const next = vi.fn();
+
+    middleware(req as never, res as never, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+    expect(res.getHeader('content-type')).toBe('text/html; charset=utf-8');
+    expect(res.body).toContain('<div id="app"></div>');
+    expect(res.body).toContain('/@id/__x00__component-canvas:preview');
+  });
+
+  it('passes through asset requests', () => {
+    const middleware = createPreviewMiddleware();
+    const req = new MockRequest('GET', '/styles.css');
+    const res = new MockResponse();
+    const next = vi.fn();
+
+    middleware(req as never, res as never, next);
+
+    expect(next).toHaveBeenCalledOnce();
+    expect(res.body).toBe('');
+  });
+});
+
+describe('manifest middleware', () => {
+  it('serves the current manifests JSON', async () => {
+    const canvasDir = resolve(fixturesDir, 'valid-workflow/.canvas');
+    const middleware = createManifestsAPIMiddleware(canvasDir);
+    const req = new MockRequest('GET', '/api/manifests');
+    const res = new MockResponse();
+
+    const next = await invokeMiddleware(middleware, req, res);
+    const payload = JSON.parse(res.body) as {
+      workflows: Array<{ id: string }>;
+      errors: unknown[];
+    };
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+    expect(res.getHeader('content-type')).toBe('application/json; charset=utf-8');
+    expect(payload.workflows[0]?.id).toBe('login');
+    expect(payload.errors).toEqual([]);
+  });
+
+  it('starts an SSE stream with the current manifests payload', async () => {
+    const canvasDir = resolve(fixturesDir, 'valid-workflow/.canvas');
+    const middleware = createSSEMiddleware(canvasDir);
+    const req = new MockRequest('GET', '/api/manifests/stream');
+    const res = new MockResponse();
+    const next = vi.fn();
+
+    middleware(req as never, res as never, next);
+    await waitFor(() => res.writes.length > 0);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+    expect(res.getHeader('content-type')).toBe('text/event-stream');
+    expect(res.body).toContain('data: ');
+    expect(res.body).toContain('"id":"login"');
+  });
+});
+
+class MockRequest extends EventEmitter {
+  method: string;
+  url: string;
+
+  constructor(method: string, url: string) {
+    super();
+    this.method = method;
+    this.url = url;
+  }
+}
+
+class MockResponse extends EventEmitter {
+  statusCode = 200;
+  body = '';
+  writes: string[] = [];
+  writableEnded = false;
+  destroyed = false;
+
+  #headers = new Map<string, string>();
+
+  setHeader(name: string, value: string): void {
+    this.#headers.set(name.toLowerCase(), value);
+  }
+
+  getHeader(name: string): string | undefined {
+    return this.#headers.get(name.toLowerCase());
+  }
+
+  flushHeaders(): void {}
+
+  write(chunk: string): boolean {
+    this.writes.push(chunk);
+    this.body += chunk;
+    return true;
+  }
+
+  end(chunk?: string): this {
+    if (chunk) {
+      this.write(chunk);
     }
 
-    return entries;
-  }, {});
+    this.writableEnded = true;
+    this.emit('finish');
+    return this;
+  }
+}
+
+async function invokeMiddleware(
+  middleware: ReturnType<typeof createManifestsAPIMiddleware>,
+  req: MockRequest,
+  res: MockResponse
+): Promise<ReturnType<typeof vi.fn>> {
+  return await new Promise((resolvePromise, reject) => {
+    const next = vi.fn((error?: unknown) => {
+      cleanup();
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolvePromise(next);
+    });
+
+    const onFinish = () => {
+      cleanup();
+      resolvePromise(next);
+    };
+
+    const cleanup = () => {
+      res.off('finish', onFinish);
+    };
+
+    res.on('finish', onFinish);
+    middleware(req as never, res as never, next);
+  });
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const startTime = Date.now();
+
+  while (!predicate()) {
+    if (Date.now() - startTime > timeoutMs) {
+      throw new Error('Timed out waiting for condition.');
+    }
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
 }
