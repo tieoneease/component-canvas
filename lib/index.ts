@@ -1,3 +1,4 @@
+export * from './adapter.ts';
 export * from './config.ts';
 export * from './init.ts';
 export * from './manifest.ts';

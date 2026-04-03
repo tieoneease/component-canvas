@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 
 import { normalizePath, type Alias, type Plugin, type UserConfig, type ViteDevServer } from 'vite';
 
+import { SvelteAdapter, type ComponentEntry } from './adapter.ts';
 import { parseWorkflowManifests } from './manifest.ts';
 
 export interface CanvasVitePluginOptions {
@@ -21,12 +22,6 @@ const GLOBAL_CSS_MODULE_ID = 'virtual:canvas-global-css';
 const RESOLVED_MANIFESTS_MODULE_ID = '\0component-canvas:manifests';
 const RESOLVED_COMPONENTS_MODULE_ID = '\0component-canvas:components';
 const RESOLVED_GLOBAL_CSS_MODULE_ID = '\0component-canvas:global-css';
-
-
-interface ComponentModuleEntry {
-  key: string;
-  absolutePath: string;
-}
 
 export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plugin {
   const resolvedCanvasDir = resolve(options.canvasDir);
@@ -77,8 +72,6 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
 
       return null;
     },
-
-
 
     async load(id) {
       if (id === RESOLVED_MANIFESTS_MODULE_ID) {
@@ -136,18 +129,9 @@ async function loadManifestsModule(
 
 async function loadComponentsModule(canvasDir: string): Promise<string> {
   const components = await collectComponents(canvasDir);
-  const importLines = components.map((entry, index) => {
-    return `import Component${index} from ${JSON.stringify(toFsImportPath(entry.absolutePath))};`;
-  });
-  const objectEntries = components.map((entry, index) => {
-    return `  ${JSON.stringify(entry.key)}: Component${index}`;
-  });
+  const adapter = new SvelteAdapter();
 
-  return [
-    ...importLines,
-    `const components = ${objectEntries.length > 0 ? `\n{\n${objectEntries.join(',\n')}\n}` : '{}'};`,
-    'export default components;'
-  ].join('\n');
+  return adapter.generateComponentModule(components);
 }
 
 function loadGlobalCssModule(globalCssPath?: string): string {
@@ -160,7 +144,7 @@ function loadGlobalCssModule(globalCssPath?: string): string {
   return [`import ${JSON.stringify(fsImportPath)};`, `export default ${JSON.stringify(fsImportPath)};`].join('\n');
 }
 
-async function collectComponents(canvasDir: string): Promise<ComponentModuleEntry[]> {
+async function collectComponents(canvasDir: string): Promise<ComponentEntry[]> {
   const workflowsDir = resolve(canvasDir, 'workflows');
 
   if (!(await pathExists(workflowsDir))) {
@@ -173,7 +157,7 @@ async function collectComponents(canvasDir: string): Promise<ComponentModuleEntr
     .map((entry) => join(workflowsDir, entry.name))
     .sort((left, right) => left.localeCompare(right));
 
-  const components: ComponentModuleEntry[] = [];
+  const components: ComponentEntry[] = [];
 
   for (const workflowDir of workflowDirs) {
     const workflowId = await resolveWorkflowId(workflowDir);

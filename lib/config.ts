@@ -4,6 +4,8 @@ import { join, resolve } from 'node:path';
 
 import { loadConfigFromFile, type ConfigEnv } from 'vite';
 
+import type { PurityConfig } from './adapter.ts';
+
 export interface CanvasConfig {
   /** Optional path to the project's .canvas directory. */
   canvasDir?: string;
@@ -15,6 +17,8 @@ export interface CanvasConfig {
   mocks?: Record<string, string>;
   /** Additional Vite resolve aliases. */
   aliases?: Record<string, string>;
+  /** Purity enforcement rules for visual components. */
+  purity?: PurityConfig;
 }
 
 export const CANVAS_CONFIG_FILE_NAME = 'canvas.config.ts';
@@ -56,6 +60,7 @@ function validateConfig(config: unknown, configPath: string): asserts config is 
   validateOptionalString(config, 'globalCss', configPath);
   validateOptionalStringRecord(config, 'mocks', configPath);
   validateOptionalStringRecord(config, 'aliases', configPath);
+  validateOptionalPurityConfig(config, configPath);
 }
 
 function validateOptionalString(
@@ -88,6 +93,42 @@ function validateOptionalStringRecord(
   for (const [entryKey, entryValue] of Object.entries(value)) {
     if (typeof entryValue !== 'string') {
       throw new Error(`${configPath} field "${key}.${entryKey}" must be a string.`);
+    }
+  }
+}
+
+function validateOptionalPurityConfig(config: Record<string, unknown>, configPath: string): void {
+  const value = config.purity;
+
+  if (value === undefined) {
+    return;
+  }
+
+  if (!isPlainObject(value)) {
+    throw new Error(`${configPath} field "purity" must be an object when provided.`);
+  }
+
+  validateRequiredStringArray(value, 'componentPaths', configPath, 'purity');
+  validateRequiredStringArray(value, 'forbiddenImports', configPath, 'purity');
+}
+
+function validateRequiredStringArray(
+  config: Record<string, unknown>,
+  key: keyof PurityConfig,
+  configPath: string,
+  parentKey: 'purity'
+): void {
+  const value = config[key];
+
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(
+      `${configPath} field "${parentKey}.${key}" must be a non-empty array of strings.`
+    );
+  }
+
+  for (const [index, entryValue] of value.entries()) {
+    if (typeof entryValue !== 'string') {
+      throw new Error(`${configPath} field "${parentKey}.${key}[${index}]" must be a string.`);
     }
   }
 }
