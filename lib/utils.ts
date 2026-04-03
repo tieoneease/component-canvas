@@ -1,5 +1,6 @@
 import { constants } from 'node:fs';
 import { access, stat } from 'node:fs/promises';
+import type { IncomingMessage } from 'node:http';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -42,6 +43,33 @@ export function escapeAttributeValue(value: string): string {
 
 export function toFsImportPath(path: string): string {
   return `/@fs/${normalizePath(resolve(path))}`;
+}
+
+export function ensureTrailingSlash(url: string): string {
+  return url.endsWith('/') ? url : `${url}/`;
+}
+
+export function resolvePreviewUrl(serverUrl: string): string {
+  const normalizedUrl = ensureTrailingSlash(serverUrl);
+  const parsedUrl = new URL(normalizedUrl);
+
+  if (parsedUrl.pathname.endsWith('/preview/')) {
+    return parsedUrl.toString();
+  }
+
+  return new URL('preview/', parsedUrl).toString();
+}
+
+export function getRequestPath(req: Pick<IncomingMessage, 'url'>): string {
+  return getRequestPathFromUrl(req.url);
+}
+
+export function getRequestPathFromUrl(url: string | undefined): string {
+  try {
+    return new URL(url ?? '/', 'http://component-canvas.local').pathname;
+  } catch {
+    return '/';
+  }
 }
 
 export async function importFreshModule(modulePath: string): Promise<unknown> {

@@ -20,10 +20,12 @@ import { renderCheck, type RenderCheckResult } from '../lib/render-check.ts';
 import { createBrowserPool } from '../lib/screenshot.ts';
 import { startServer } from '../lib/server.ts';
 import {
+  ensureTrailingSlash,
   escapeAttributeValue,
   getErrorMessage,
   isPlainObject,
   pathExists,
+  resolvePreviewUrl,
   sanitizePathSegment
 } from '../lib/utils.ts';
 
@@ -939,21 +941,6 @@ function parseRenderPropsOption(value: string | undefined): Record<string, unkno
   }
 
   return parsed;
-}
-
-function resolvePreviewUrl(url: string): string {
-  const normalizedUrl = ensureTrailingSlash(url);
-  const parsedUrl = new URL(normalizedUrl);
-
-  if (parsedUrl.pathname.endsWith('/preview/')) {
-    return parsedUrl.toString();
-  }
-
-  return new URL('preview/', parsedUrl).toString();
-}
-
-function ensureTrailingSlash(url: string): string {
-  return url.endsWith('/') ? url : `${url}/`;
 }
 
 function parsePortOption(value: string): number {

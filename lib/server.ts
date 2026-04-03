@@ -13,8 +13,9 @@ import {
 } from './render.ts';
 import { composePreviewConfig, loadProjectViteConfig, resolvePackageEntry } from './project.ts';
 import { resolveFromProject } from './resolve-plugin.ts';
-import { getErrorMessage, pathExists } from './utils.ts';
+import { getErrorMessage, getRequestPath, getRequestPathFromUrl, pathExists } from './utils.ts';
 import canvasVitePlugin, {
+  createManifestStreamStore,
   createManifestsAPIMiddleware,
   createPreviewMiddleware,
   createSSEMiddleware
@@ -62,9 +63,16 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
   const canvasConfig = await loadConfig(resolvedProjectRoot);
   const resolvedMocks = mergeStringMaps(canvasConfig?.mocks, options.mocks);
   const renderRegistry = createRenderRegistry();
+  const manifestStreamStore = createManifestStreamStore();
   const basePreviewMiddleware = createPreviewMiddleware();
-  const sseMiddleware = createSSEMiddleware(resolvedCanvasDir);
-  const manifestsApiMiddleware = createManifestsAPIMiddleware(resolvedCanvasDir);
+  const sseMiddleware = createSSEMiddleware({
+    canvasDir: resolvedCanvasDir,
+    manifestStreamStore
+  });
+  const manifestsApiMiddleware = createManifestsAPIMiddleware({
+    canvasDir: resolvedCanvasDir,
+    manifestStreamStore
+  });
   const shellMiddleware = await createShellMiddleware();
   const projectViteConfig = await loadProjectViteConfig(
     resolvedProjectRoot,
@@ -86,7 +94,8 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
         aliases: projectAliases,
         mocks: resolvedMocks,
         purity: canvasConfig?.purity ?? adapter.defaultPurityRules(),
-        renderRegistry
+        renderRegistry,
+        manifestStreamStore
       })
     ],
     packageResolutionFallbacks
@@ -255,42 +264,11 @@ function handleRequest(options: {
   } = options;
   const pathname = getRequestPath(req);
 
-  if (pathname === '/preview/api/manifests/stream') {
-    const originalUrl = req.url;
-    req.url = stripPreviewPrefix(req.url);
-    invokeMiddleware(sseMiddleware, req, res, previewServer, () => {
-      req.url = originalUrl;
-
-      if (!isResponseHandled(res)) {
-        sendNotFound(res);
-      }
-    });
-    return;
-  }
-
-  if (pathname === '/preview/api/manifests') {
-    const originalUrl = req.url;
-    req.url = stripPreviewPrefix(req.url);
-    invokeMiddleware(manifestsApiMiddleware, req, res, previewServer, () => {
-      req.url = originalUrl;
-
-      if (!isResponseHandled(res)) {
-        sendNotFound(res);
-      }
-    });
-    return;
-  }
-
-  if (pathname === '/preview/api/renders') {
-    const originalUrl = req.url;
-    req.url = stripPreviewPrefix(req.url);
-    invokeMiddleware(renderApiMiddleware, req, res, previewServer, () => {
-      req.url = originalUrl;
-
-      if (!isResponseHandled(res)) {
-        sendNotFound(res);
-      }
-    });
+  if (
+    routePreviewApiRequest(pathname, '/preview/api/manifests/stream', req, res, sseMiddleware, previewServer) ||
+    routePreviewApiRequest(pathname, '/preview/api/manifests', req, res, manifestsApiMiddleware, previewServer) ||
+    routePreviewApiRequest(pathname, '/preview/api/renders', req, res, renderApiMiddleware, previewServer)
+  ) {
     return;
   }
 
@@ -359,12 +337,37 @@ function invokeMiddleware(
   }
 }
 
-function getRequestPath(req: IncomingMessage): string {
-  return getRequestPathFromUrl(req.url);
-}
+function routePreviewApiRequest(
+  pathname: string,
+  expectedPath: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+  middleware: Middleware,
+  previewServer: ViteDevServer
+): boolean {
+  if (pathname !== expectedPath) {
+    return false;
+  }
 
-function getRequestPathFromUrl(url: string | undefined): string {
-  return new URL(url ?? '/', 'http://component-canvas.local').pathname;
+  const originalUrl = req.url;
+  const restoreUrl = () => {
+    req.url = originalUrl;
+    res.off('finish', restoreUrl);
+    res.off('close', restoreUrl);
+  };
+
+  req.url = stripPreviewPrefix(req.url);
+  res.on('finish', restoreUrl);
+  res.on('close', restoreUrl);
+  invokeMiddleware(middleware, req, res, previewServer, () => {
+    restoreUrl();
+
+    if (!isResponseHandled(res)) {
+      sendNotFound(res);
+    }
+  });
+
+  return true;
 }
 
 function stripPreviewPrefix(url: string | undefined): string {

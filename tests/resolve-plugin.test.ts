@@ -4,7 +4,11 @@ import { dirname, join, resolve } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { resolveFromExports, resolveFromProject } from '../lib/resolve-plugin.ts';
+import {
+  createResolveFromExportsCache,
+  resolveFromExports,
+  resolveFromProject
+} from '../lib/resolve-plugin.ts';
 
 interface PackageFixture {
   packageJson?: unknown;
@@ -156,7 +160,7 @@ describe('resolveFromExports', () => {
     await expect(resolveFromExports(nodeModulesDir, 'broken')).resolves.toBeNull();
   });
 
-  it('caches repeated specifier resolutions', async () => {
+  it('does not reuse cache across independent resolveFromExports calls', async () => {
     const { nodeModulesDir } = await createNodeModulesFixture({
       cached: {
         packageJson: {
@@ -168,9 +172,29 @@ describe('resolveFromExports', () => {
     });
     const packageJsonPath = resolve(nodeModulesDir, 'cached', 'package.json');
 
-    const firstResolution = await resolveFromExports(nodeModulesDir, 'cached');
+    await expect(resolveFromExports(nodeModulesDir, 'cached')).resolves.toBe(
+      resolve(nodeModulesDir, 'cached', 'dist/index.js')
+    );
     await writeFile(packageJsonPath, '{ now broken', 'utf8');
-    const secondResolution = await resolveFromExports(nodeModulesDir, 'cached');
+    await expect(resolveFromExports(nodeModulesDir, 'cached')).resolves.toBeNull();
+  });
+
+  it('caches repeated specifier resolutions when given an explicit cache', async () => {
+    const { nodeModulesDir } = await createNodeModulesFixture({
+      cached: {
+        packageJson: {
+          name: 'cached',
+          exports: './dist/index.js'
+        },
+        files: ['dist/index.js']
+      }
+    });
+    const packageJsonPath = resolve(nodeModulesDir, 'cached', 'package.json');
+    const cache = createResolveFromExportsCache();
+
+    const firstResolution = await resolveFromExports(nodeModulesDir, 'cached', cache);
+    await writeFile(packageJsonPath, '{ now broken', 'utf8');
+    const secondResolution = await resolveFromExports(nodeModulesDir, 'cached', cache);
 
     expect(firstResolution).toBe(resolve(nodeModulesDir, 'cached', 'dist/index.js'));
     expect(secondResolution).toBe(firstResolution);

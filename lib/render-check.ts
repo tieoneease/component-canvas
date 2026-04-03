@@ -12,10 +12,12 @@ import {
 import { createBrowserPool, type BrowserPool } from './screenshot.ts';
 import { startServer } from './server.ts';
 import {
+  ensureTrailingSlash,
   getErrorMessage,
   importFreshModule,
   isPlainObject,
   pathExists,
+  resolvePreviewUrl,
   sanitizePathSegment
 } from './utils.ts';
 
@@ -254,18 +256,4 @@ function summarizeResults(screens: ScreenCheckResult[]): RenderCheckResult['summ
   );
 }
 
-function resolvePreviewUrl(serverUrl: string): string {
-  const normalizedUrl = ensureTrailingSlash(serverUrl);
-  const parsedUrl = new URL(normalizedUrl);
-
-  if (parsedUrl.pathname.endsWith('/preview/')) {
-    return parsedUrl.toString();
-  }
-
-  return new URL('preview/', parsedUrl).toString();
-}
-
-function ensureTrailingSlash(url: string): string {
-  return url.endsWith('/') ? url : `${url}/`;
-}
 

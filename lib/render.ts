@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 
 import type { Connect, ViteDevServer } from 'vite';
 
-import { isPlainObject, toFsImportPath } from './utils.ts';
+import { getRequestPath, isPlainObject, toFsImportPath } from './utils.ts';
 
 export interface RenderRegistration {
   id: string;
@@ -193,10 +193,3 @@ function invalidateRenderModule(previewServer: ViteDevServer, renderId: string):
   }
 }
 
-function getRequestPath(req: IncomingMessage): string {
-  try {
-    return new URL(req.url ?? '/', 'http://component-canvas.local').pathname;
-  } catch {
-    return '/';
-  }
-}

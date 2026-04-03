@@ -22,8 +22,17 @@ interface ExportMatch {
   captures: string[];
 }
 
-const resolutionCache = new Map<string, Promise<string | null>>();
-const packageMetadataCache = new Map<string, Promise<PackageMetadata | null>>();
+export interface ResolveFromExportsCache {
+  resolutionCache: Map<string, Promise<string | null>>;
+  packageMetadataCache: Map<string, Promise<PackageMetadata | null>>;
+}
+
+export function createResolveFromExportsCache(): ResolveFromExportsCache {
+  return {
+    resolutionCache: new Map<string, Promise<string | null>>(),
+    packageMetadataCache: new Map<string, Promise<PackageMetadata | null>>()
+  };
+}
 
 export function resolveFromProject(
   projectRoot: string,
@@ -33,6 +42,7 @@ export function resolveFromProject(
   const targetedPackages = [...new Set(packages)];
   let nodeModulesDirPromise: Promise<string | null> | undefined;
   const pluginCache = new Map<string, Promise<string | null>>();
+  const resolveFromExportsCache = createResolveFromExportsCache();
 
   return {
     name: 'resolve-from-project',
@@ -58,7 +68,7 @@ export function resolveFromProject(
           return null;
         }
 
-        return resolveFromExports(nodeModulesDir, source);
+        return resolveFromExports(nodeModulesDir, source, resolveFromExportsCache);
       })();
 
       pluginCache.set(source, pending);
@@ -69,10 +79,11 @@ export function resolveFromProject(
 
 export async function resolveFromExports(
   nodeModulesDir: string,
-  specifier: string
+  specifier: string,
+  cache: ResolveFromExportsCache = createResolveFromExportsCache()
 ): Promise<string | null> {
   const cacheKey = `${resolve(nodeModulesDir)}\0${specifier}`;
-  const cached = resolutionCache.get(cacheKey);
+  const cached = cache.resolutionCache.get(cacheKey);
 
   if (cached) {
     return cached;
@@ -85,7 +96,7 @@ export async function resolveFromExports(
     }
 
     const packageDir = resolve(nodeModulesDir, ...parsedSpecifier.packageName.split('/'));
-    const packageMetadata = await loadPackageMetadata(packageDir);
+    const packageMetadata = await loadPackageMetadata(packageDir, cache);
 
     if (!packageMetadata) {
       return null;
@@ -102,7 +113,7 @@ export async function resolveFromExports(
     return legacyTarget ? resolve(packageDir, legacyTarget) : null;
   })();
 
-  resolutionCache.set(cacheKey, pending);
+  cache.resolutionCache.set(cacheKey, pending);
   return pending;
 }
 
@@ -170,9 +181,12 @@ function parsePackageSpecifier(specifier: string): ParsedSpecifier | null {
   };
 }
 
-async function loadPackageMetadata(packageDir: string): Promise<PackageMetadata | null> {
+async function loadPackageMetadata(
+  packageDir: string,
+  cache: ResolveFromExportsCache
+): Promise<PackageMetadata | null> {
   const cacheKey = resolve(packageDir);
-  const cached = packageMetadataCache.get(cacheKey);
+  const cached = cache.packageMetadataCache.get(cacheKey);
 
   if (cached) {
     return cached;
@@ -198,7 +212,7 @@ async function loadPackageMetadata(packageDir: string): Promise<PackageMetadata 
     }
   })();
 
-  packageMetadataCache.set(cacheKey, pending);
+  cache.packageMetadataCache.set(cacheKey, pending);
   return pending;
 }
 

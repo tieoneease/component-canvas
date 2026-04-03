@@ -24,6 +24,7 @@ import {
 } from './manifest.ts';
 import {
   getErrorMessage,
+  getRequestPath,
   importFreshModule,
   isNonEmptyString,
   isPlainObject,
@@ -39,6 +40,7 @@ export interface CanvasVitePluginOptions {
   globalCss?: string;
   purity?: PurityConfig;
   renderRegistry?: RenderRegistry;
+  manifestStreamStore?: ManifestStreamStore;
 }
 
 const MANIFESTS_MODULE_ID = 'virtual:canvas-manifests';
@@ -51,11 +53,20 @@ const RESOLVED_COMPONENTS_MODULE_ID = '\0component-canvas:components';
 const RESOLVED_GLOBAL_CSS_MODULE_ID = '\0component-canvas:global-css';
 const RESOLVED_PREVIEW_MODULE_ID = '\0component-canvas:preview';
 
-interface ManifestStreamState {
+export interface ManifestStreamState {
   connections: Set<ServerResponse>;
 }
 
-const manifestStreams = new Map<string, ManifestStreamState>();
+export type ManifestStreamStore = Map<string, ManifestStreamState>;
+
+export interface ManifestMiddlewareOptions {
+  canvasDir: string;
+  manifestStreamStore?: ManifestStreamStore;
+}
+
+export function createManifestStreamStore(): ManifestStreamStore {
+  return new Map<string, ManifestStreamState>();
+}
 
 export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plugin {
   const resolvedCanvasDir = resolve(options.canvasDir);
@@ -64,6 +75,7 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
   const resolvedAliases = createAliasEntries(options.aliases, baseDir);
   const resolvedMocks = createAliasEntries(options.mocks, baseDir);
   const resolvedGlobalCss = options.globalCss ? resolvePathOption(options.globalCss, baseDir) : undefined;
+  const manifestStreamStore = options.manifestStreamStore ?? createManifestStreamStore();
   const purityAliases = [...resolvedMocks, ...resolvedAliases];
   const resolvedPurityComponentPaths = options.purity
     ? resolveIndexedPurityPaths(options.purity.componentPaths, purityAliases, baseDir)
@@ -184,7 +196,7 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
       }
 
       if (canvasChanged) {
-        void notifyManifestUpdate(resolvedCanvasDir);
+        void notifyManifestUpdate(manifestStreamStore, resolvedCanvasDir);
       }
 
       context.server.ws.send({ type: 'full-reload' });
@@ -211,8 +223,10 @@ export function createPreviewMiddleware(): Connect.NextHandleFunction {
   };
 }
 
-export function createSSEMiddleware(canvasDir: string): Connect.NextHandleFunction {
-  const resolvedCanvasDir = resolve(canvasDir);
+export function createSSEMiddleware(
+  canvasDirOrOptions: string | ManifestMiddlewareOptions
+): Connect.NextHandleFunction {
+  const { resolvedCanvasDir, manifestStreamStore } = resolveManifestMiddlewareOptions(canvasDirOrOptions);
 
   return (req, res, next) => {
     if (req.method !== 'GET' || getRequestPath(req) !== '/api/manifests/stream') {
@@ -220,12 +234,14 @@ export function createSSEMiddleware(canvasDir: string): Connect.NextHandleFuncti
       return;
     }
 
-    void handleSSEConnection(req, res, resolvedCanvasDir).catch(next);
+    void handleSSEConnection(req, res, resolvedCanvasDir, manifestStreamStore).catch(next);
   };
 }
 
-export function createManifestsAPIMiddleware(canvasDir: string): Connect.NextHandleFunction {
-  const resolvedCanvasDir = resolve(canvasDir);
+export function createManifestsAPIMiddleware(
+  canvasDirOrOptions: string | ManifestMiddlewareOptions
+): Connect.NextHandleFunction {
+  const { resolvedCanvasDir } = resolveManifestMiddlewareOptions(canvasDirOrOptions);
 
   return (req, res, next) => {
     if (req.method !== 'GET' || getRequestPath(req) !== '/api/manifests') {
@@ -240,9 +256,10 @@ export function createManifestsAPIMiddleware(canvasDir: string): Connect.NextHan
 async function handleSSEConnection(
   req: IncomingMessage,
   res: ServerResponse,
-  canvasDir: string
+  canvasDir: string,
+  manifestStreamStore: ManifestStreamStore
 ): Promise<void> {
-  const state = getManifestStreamState(canvasDir);
+  const state = getManifestStreamState(manifestStreamStore, canvasDir);
 
   res.statusCode = 200;
   res.setHeader('Content-Type', 'text/event-stream');
@@ -273,8 +290,11 @@ async function handleManifestsAPIRequest(
   res.end(payload);
 }
 
-async function notifyManifestUpdate(canvasDir: string): Promise<void> {
-  const state = manifestStreams.get(normalizeCanvasDir(canvasDir));
+async function notifyManifestUpdate(
+  manifestStreamStore: ManifestStreamStore,
+  canvasDir: string
+): Promise<void> {
+  const state = manifestStreamStore.get(normalizeCanvasDir(canvasDir));
 
   if (!state || state.connections.size === 0) {
     return;
@@ -317,9 +337,12 @@ async function readManifestData(canvasDir: string): Promise<ParseWorkflowManifes
   }
 }
 
-function getManifestStreamState(canvasDir: string): ManifestStreamState {
+function getManifestStreamState(
+  manifestStreamStore: ManifestStreamStore,
+  canvasDir: string
+): ManifestStreamState {
   const normalizedCanvasDir = normalizeCanvasDir(canvasDir);
-  const existing = manifestStreams.get(normalizedCanvasDir);
+  const existing = manifestStreamStore.get(normalizedCanvasDir);
 
   if (existing) {
     return existing;
@@ -329,8 +352,24 @@ function getManifestStreamState(canvasDir: string): ManifestStreamState {
     connections: new Set<ServerResponse>()
   };
 
-  manifestStreams.set(normalizedCanvasDir, created);
+  manifestStreamStore.set(normalizedCanvasDir, created);
   return created;
+}
+
+function resolveManifestMiddlewareOptions(
+  canvasDirOrOptions: string | ManifestMiddlewareOptions
+): { resolvedCanvasDir: string; manifestStreamStore: ManifestStreamStore } {
+  if (typeof canvasDirOrOptions === 'string') {
+    return {
+      resolvedCanvasDir: resolve(canvasDirOrOptions),
+      manifestStreamStore: createManifestStreamStore()
+    };
+  }
+
+  return {
+    resolvedCanvasDir: resolve(canvasDirOrOptions.canvasDir),
+    manifestStreamStore: canvasDirOrOptions.manifestStreamStore ?? createManifestStreamStore()
+  };
 }
 
 function normalizeCanvasDir(canvasDir: string): string {
@@ -972,14 +1011,6 @@ function getDefaultExport(module: unknown): unknown {
   }
 
   return undefined;
-}
-
-function getRequestPath(req: IncomingMessage): string {
-  try {
-    return new URL(req.url ?? '/', 'http://component-canvas.local').pathname;
-  } catch {
-    return '/';
-  }
 }
 
 function hasFileExtension(pathname: string): boolean {
