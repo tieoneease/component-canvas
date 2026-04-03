@@ -138,7 +138,7 @@ describe('canvasVitePlugin', () => {
     expect(previewModule).toContain("virtual:canvas-components");
     expect(previewModule).toContain("virtual:canvas-global-css");
     expect(previewModule).toContain('#/screen/<workflowId>/<screenId>');
-    expect(previewModule).toContain('virtual:canvas-render-');
+    expect(previewModule).toContain('/preview/@id/__x00__component-canvas:render-');
   });
 
   it('adds fs allow entries through the Vite config hook without injecting aliases', () => {
