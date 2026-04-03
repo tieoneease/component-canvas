@@ -516,7 +516,6 @@ function formatInitSummary(result: InitProjectResult): string {
 
   lines.push('', 'Detected project features:');
   lines.push(`- src/lib: ${result.detected.lib ? 'yes' : 'no'}`);
-  lines.push(`- tailwind.config.*: ${result.detected.tailwind ? 'yes' : 'no'}`);
   lines.push(`- svelte.config.js: ${result.svelteConfig ? 'yes' : 'no'}`);
 
   if (result.config === null) {

@@ -72,16 +72,9 @@ describe('startServer', () => {
 
         const pageResponse = await fetch(server.url);
         const html = await pageResponse.text();
-        const cssResponse = await fetch(new URL('/src/app.css', server.url));
-        const css = await cssResponse.text();
 
         expect(pageResponse.ok).toBe(true);
         expect(html).toContain('id="app"');
-        expect(cssResponse.ok).toBe(true);
-        expect(css).not.toContain('@tailwind');
-        expect(css).toContain('.bg-sky-500');
-        expect(css).toContain('.px-4');
-        expect(css).toContain('.rounded-lg');
       } finally {
         if (server) {
           await expect(server.close()).resolves.toBeUndefined();

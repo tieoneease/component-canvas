@@ -47,7 +47,6 @@ describe('canvasVitePlugin', () => {
       mocks: {
         '$app/environment': './tests/mocks/app-environment.ts'
       },
-      tailwindConfig: './tailwind.config.ts',
       globalCss: './src/app.css'
     });
 
@@ -67,7 +66,7 @@ describe('canvasVitePlugin', () => {
       '$app/environment': resolve(projectRoot, 'tests/mocks/app-environment.ts'),
       '$lib': resolve(projectRoot, 'src/lib')
     });
-    expect(config?.css?.postcss?.plugins).toHaveLength(1);
+
   });
 
   it('emits a virtual global CSS module when globalCss is configured', async () => {

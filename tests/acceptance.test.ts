@@ -61,7 +61,7 @@ describe('component-canvas acceptance workflow', () => {
       const projectRoot = await mkdtemp(join(tmpdir(), 'component-canvas-acceptance-'));
       tempDirs.push(projectRoot);
 
-      const initPayload = await runJsonCli<{ config: string | null; canvasDir: string; detected: { lib: boolean; tailwind: boolean } }>(
+      const initPayload = await runJsonCli<{ config: string | null; canvasDir: string; detected: { lib: boolean } }>(
         projectRoot,
         ['init', '--json']
       );
@@ -70,8 +70,7 @@ describe('component-canvas acceptance workflow', () => {
         config: null,
         canvasDir: '.canvas/',
         detected: {
-          lib: false,
-          tailwind: false
+          lib: false
         }
       });
       await expect(access(resolve(projectRoot, '.canvas', 'workflows', 'example', '_flow.ts'))).resolves.toBeUndefined();

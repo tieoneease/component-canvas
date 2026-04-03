@@ -9,8 +9,6 @@ export interface CanvasConfig {
   canvasDir?: string;
   /** Path to project's src/lib (for $lib alias). */
   lib?: string;
-  /** Path to project's Tailwind config. */
-  tailwind?: string;
   /** Path to global CSS file to inject. */
   globalCss?: string;
   /** Import path → mock module path mappings. */
@@ -54,7 +52,7 @@ function validateConfig(config: unknown, configPath: string): asserts config is 
 
   validateOptionalString(config, 'canvasDir', configPath);
   validateOptionalString(config, 'lib', configPath);
-  validateOptionalString(config, 'tailwind', configPath);
+
   validateOptionalString(config, 'globalCss', configPath);
   validateOptionalStringRecord(config, 'mocks', configPath);
   validateOptionalStringRecord(config, 'aliases', configPath);
@@ -62,7 +60,7 @@ function validateConfig(config: unknown, configPath: string): asserts config is 
 
 function validateOptionalString(
   config: Record<string, unknown>,
-  key: 'canvasDir' | 'lib' | 'tailwind' | 'globalCss',
+  key: 'canvasDir' | 'lib' | 'globalCss',
   configPath: string
 ): void {
   const value = config[key];

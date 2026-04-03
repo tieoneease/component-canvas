@@ -5,3 +5,4 @@ bun.lock
 *.tgz
 .dev/
 tests/output/**/*.png
+app/src/canvas-sources.css

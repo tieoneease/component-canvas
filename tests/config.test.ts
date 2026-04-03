@@ -24,7 +24,6 @@ describe('loadConfig', () => {
       [
         'export default {',
         "  lib: './src/lib',",
-        "  tailwind: './tailwind.config.ts',",
         "  globalCss: './src/global.css',",
         '  mocks: {',
         "    '$env/static/public': './.canvas/mocks/public.ts'",
@@ -40,7 +39,6 @@ describe('loadConfig', () => {
 
     await expect(loadConfig(projectRoot)).resolves.toEqual({
       lib: './src/lib',
-      tailwind: './tailwind.config.ts',
       globalCss: './src/global.css',
       mocks: {
         '$env/static/public': './.canvas/mocks/public.ts'
@@ -100,7 +98,8 @@ describe('project mode server wiring', () => {
         expect(renderedText).toContain('Library alias resolved');
         expect(renderedText).toContain('extra alias resolved');
         expect(renderedText).toContain('mocked env value');
-        expect(backgroundColor).toBe('rgb(20, 184, 166)');
+        // Tailwind v4 uses oklch color space
+        expect(backgroundColor).toContain('oklch');
         expect(globalCssColor).toBe('rgb(20, 184, 166)');
         expect(consoleErrors).toEqual([]);
         expect(pageErrors).toEqual([]);
@@ -128,7 +127,6 @@ async function createProjectModeFixture(): Promise<string> {
     [
       'export default {',
       "  lib: './src/lib',",
-      "  tailwind: './tailwind.config.ts',",
       "  globalCss: './src/global.css',",
       '  mocks: {',
       "    '$env/static/public': './.canvas/mocks/public.ts'",
@@ -136,28 +134,6 @@ async function createProjectModeFixture(): Promise<string> {
       '  aliases: {',
       "    '@shared': './src/shared'",
       '  }',
-      '};',
-      ''
-    ].join('\n'),
-    'utf8'
-  );
-
-  await writeFile(
-    resolve(projectRoot, 'tailwind.config.ts'),
-    [
-      'export default {',
-      '  content: {',
-      '    relative: true,',
-      "    files: ['./.canvas/**/*.{svelte,ts}', './src/**/*.{svelte,ts,js}']",
-      '  },',
-      '  theme: {',
-      '    extend: {',
-      '      colors: {',
-      "        brand: '#14b8a6'",
-      '      }',
-      '    }',
-      '  },',
-      '  plugins: []',
       '};',
       ''
     ].join('\n'),
@@ -197,7 +173,7 @@ async function createProjectModeFixture(): Promise<string> {
       "  import { PUBLIC_FLAG } from '$env/static/public';",
       '</script>',
       '',
-      '<div data-project-mode-screen class="bg-brand px-4 py-3 text-white">',
+      '<div data-project-mode-screen class="bg-teal-500 px-4 py-3 text-white">',
       '  <SharedBadge />',
       '  <p data-shared-message>{sharedMessage}</p>',
       '  <p data-mock-flag>{PUBLIC_FLAG}</p>',

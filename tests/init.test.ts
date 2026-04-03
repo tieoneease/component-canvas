@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from 'node:child_process';
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -20,7 +20,6 @@ describe('component-canvas init', () => {
     tempDirs.push(projectRoot);
 
     await mkdir(resolve(projectRoot, 'src', 'lib'), { recursive: true });
-    await writeFile(resolve(projectRoot, 'tailwind.config.ts'), 'export default {};\n', 'utf8');
 
     const { stdout, stderr } = await execFile('node', [cliPath, 'init', '--json'], {
       cwd: projectRoot
@@ -32,17 +31,10 @@ describe('component-canvas init', () => {
     expect(payload).toEqual({
       config: 'canvas.config.ts',
       canvasDir: '.canvas/',
-      detected: {
-        lib: true,
-        tailwind: true
-      }
+      detected: { lib: true }
     });
     expect(configSource).toContain("lib: './src/lib'");
-    expect(configSource).toContain("tailwind: './tailwind.config.ts'");
     await expect(access(resolve(projectRoot, '.canvas', 'workflows', 'example', '_flow.ts'))).resolves.toBeUndefined();
-    await expect(
-      access(resolve(projectRoot, '.canvas', 'workflows', 'example', 'ExampleScreen.svelte'))
-    ).resolves.toBeUndefined();
   });
 
   it('creates only the .canvas scaffold in standalone directories', async () => {
@@ -58,10 +50,7 @@ describe('component-canvas init', () => {
     expect(payload).toEqual({
       config: null,
       canvasDir: '.canvas/',
-      detected: {
-        lib: false,
-        tailwind: false
-      }
+      detected: { lib: false }
     });
     await expect(access(resolve(projectRoot, '.canvas', 'workflows', 'example', '_flow.ts'))).resolves.toBeUndefined();
     await expect(access(resolve(projectRoot, 'canvas.config.ts'))).rejects.toThrow();

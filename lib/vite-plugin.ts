@@ -2,7 +2,6 @@ import { constants } from 'node:fs';
 import { access, readdir } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
-import tailwindcss from 'tailwindcss';
 import { normalizePath, type Alias, type Plugin, type UserConfig, type ViteDevServer } from 'vite';
 
 import { parseWorkflowManifests } from './manifest.ts';
@@ -12,7 +11,6 @@ export interface CanvasVitePluginOptions {
   projectRoot?: string;
   aliases?: Record<string, string>;
   mocks?: Record<string, string>;
-  tailwindConfig?: string;
   globalCss?: string;
 }
 
@@ -23,6 +21,7 @@ const GLOBAL_CSS_MODULE_ID = 'virtual:canvas-global-css';
 const RESOLVED_MANIFESTS_MODULE_ID = '\0component-canvas:manifests';
 const RESOLVED_COMPONENTS_MODULE_ID = '\0component-canvas:components';
 const RESOLVED_GLOBAL_CSS_MODULE_ID = '\0component-canvas:global-css';
+
 
 interface ComponentModuleEntry {
   key: string;
@@ -35,13 +34,11 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
   const baseDir = resolvedProjectRoot ?? dirname(resolvedCanvasDir);
   const resolvedAliases = createAliasEntries(options.aliases, baseDir);
   const resolvedMocks = createAliasEntries(options.mocks, baseDir);
-  const resolvedTailwindConfig = options.tailwindConfig
-    ? resolvePathOption(options.tailwindConfig, baseDir)
-    : undefined;
   const resolvedGlobalCss = options.globalCss ? resolvePathOption(options.globalCss, baseDir) : undefined;
 
   return {
     name: 'component-canvas-vite-plugin',
+    enforce: 'pre',
 
     config(): UserConfig {
       const allow = uniqueStrings([resolvedCanvasDir, resolvedProjectRoot, resolvedGlobalCss]);
@@ -59,14 +56,6 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
       if (alias.length > 0) {
         config.resolve = {
           alias
-        };
-      }
-
-      if (resolvedTailwindConfig) {
-        config.css = {
-          postcss: {
-            plugins: [tailwindcss({ config: resolvedTailwindConfig })]
-          }
         };
       }
 
@@ -88,6 +77,8 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
 
       return null;
     },
+
+
 
     async load(id) {
       if (id === RESOLVED_MANIFESTS_MODULE_ID) {
