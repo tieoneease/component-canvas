@@ -1,9 +1,9 @@
 import { mount } from 'svelte';
 
+import '@xyflow/svelte/dist/style.css';
 import './app.css';
-import 'virtual:canvas-global-css';
 import App from './App.svelte';
 
 mount(App, {
-  target: document.getElementById('app')
+  target: document.getElementById('shell-app')
 });
