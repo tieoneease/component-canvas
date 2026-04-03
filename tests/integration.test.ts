@@ -112,7 +112,7 @@ describe('component-canvas integration pipeline', () => {
 
   it('reports workflow counts through list --json', async () => {
     const projectRoot = resolve(fixturesDir, 'valid-workflow');
-    const { stdout, stderr } = await execFile('node', [cliPath, 'list', '--json'], {
+    const { stdout, stderr } = await execFile('npx', ['tsx', cliPath, 'list', '--json'], {
       cwd: projectRoot
     });
 

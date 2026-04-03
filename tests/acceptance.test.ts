@@ -7,6 +7,9 @@ import { promisify } from 'node:util';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { renderCheck } from '../lib/render-check.ts';
+import { extractFirstJsonObject } from './helpers.ts';
+
 const execFile = promisify(execFileCallback);
 const cliPath = resolve(process.cwd(), 'bin/cli.ts');
 const tempDirs: string[] = [];
@@ -37,6 +40,27 @@ interface ScreenshotCommandPayload {
     width: number;
     height: number;
   }>;
+}
+
+interface RenderCheckCommandPayload {
+  screens: Array<{
+    workflow: string;
+    screen: string;
+    status: 'pass' | 'fail' | 'prototype';
+    error?: string;
+  }>;
+  summary: {
+    pass: number;
+    fail: number;
+    prototype: number;
+    total: number;
+  };
+}
+
+interface CliCommandResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
 }
 
 interface StartedDevCommand {
@@ -157,17 +181,158 @@ describe('component-canvas acceptance workflow', () => {
     },
     90_000
   );
+
+  it(
+    'reports purity violations as render-check failures end-to-end',
+    async () => {
+      const projectRoot = await createPurityViolationAcceptanceFixture();
+      const canvasDir = resolve(projectRoot, '.canvas');
+      const devCommand = await startDevCommand(projectRoot);
+
+      try {
+        const result = await renderCheck({
+          canvasDir,
+          projectRoot,
+          serverUrl: devCommand.payload.url
+        });
+
+        expect(result.screens).toEqual([
+          {
+            workflow: 'impure',
+            screen: 'blocked',
+            status: 'fail',
+            error: expect.stringContaining('Purity violation')
+          }
+        ]);
+        expect(result.summary).toEqual({
+          pass: 0,
+          fail: 1,
+          prototype: 0,
+          total: 1
+        });
+      } finally {
+        await stopChildProcess(devCommand.child);
+        activeChildren.delete(devCommand.child);
+      }
+    },
+    60_000
+  );
+
+  it(
+    'returns the full render-check JSON shape for pass/fail/prototype screens',
+    async () => {
+      const projectRoot = await createRenderCheckAcceptanceFixture();
+
+      const result = await runJsonCli<RenderCheckCommandPayload>(projectRoot, ['render-check', '--json'], {
+        expectedExitCode: 1
+      });
+
+      expect(result).toEqual({
+        screens: [
+          {
+            workflow: 'adopted',
+            screen: 'ready',
+            status: 'pass'
+          },
+          {
+            workflow: 'broken',
+            screen: 'crashed',
+            status: 'fail',
+            error: expect.stringContaining('Broken screen exploded')
+          },
+          {
+            workflow: 'prototype',
+            screen: 'concept',
+            status: 'prototype'
+          }
+        ],
+        summary: {
+          pass: 1,
+          fail: 1,
+          prototype: 1,
+          total: 3
+        }
+      });
+    },
+    60_000
+  );
+
+  it(
+    'filters render-check output to a single workflow with --workflow',
+    async () => {
+      const projectRoot = await createRenderCheckAcceptanceFixture();
+
+      const result = await runJsonCli<RenderCheckCommandPayload>(projectRoot, [
+        'render-check',
+        '--workflow',
+        'adopted',
+        '--json'
+      ]);
+
+      expect(result).toEqual({
+        screens: [
+          {
+            workflow: 'adopted',
+            screen: 'ready',
+            status: 'pass'
+          }
+        ],
+        summary: {
+          pass: 1,
+          fail: 0,
+          prototype: 0,
+          total: 1
+        }
+      });
+    },
+    60_000
+  );
 });
 
-async function runJsonCli<T>(cwd: string, args: string[]): Promise<T> {
-  const { stdout, stderr } = await execFile(process.execPath, [cliPath, ...args], {
-    cwd,
-    maxBuffer: 10 * 1024 * 1024
-  });
+async function runJsonCli<T>(
+  cwd: string,
+  args: string[],
+  options: { expectedExitCode?: number } = {}
+): Promise<T> {
+  const result = await runCliCommand(cwd, args);
+  const jsonSource = extractFirstJsonObject(result.stdout);
 
-  expect(stderr).toBe('');
+  expect(result.exitCode).toBe(options.expectedExitCode ?? 0);
+  expect(result.stderr).toBe('');
+  expect(jsonSource).not.toBeNull();
 
-  return JSON.parse(stdout) as T;
+  return JSON.parse(jsonSource ?? '{}') as T;
+}
+
+async function runCliCommand(cwd: string, args: string[]): Promise<CliCommandResult> {
+  try {
+    const { stdout, stderr } = await execFile('npx', ['tsx', cliPath, ...args], {
+      cwd,
+      maxBuffer: 10 * 1024 * 1024
+    });
+
+    return {
+      stdout,
+      stderr,
+      exitCode: 0
+    };
+  } catch (error) {
+    const execError = error as {
+      stdout?: string;
+      stderr?: string;
+      code?: number;
+    };
+
+    if (typeof execError.stdout === 'string' || typeof execError.stderr === 'string') {
+      return {
+        stdout: execError.stdout ?? '',
+        stderr: execError.stderr ?? '',
+        exitCode: typeof execError.code === 'number' ? execError.code : 1
+      };
+    }
+
+    throw error;
+  }
 }
 
 async function createSignupWorkflow(projectRoot: string): Promise<void> {
@@ -333,8 +498,206 @@ async function createSignupWorkflow(projectRoot: string): Promise<void> {
   );
 }
 
+async function createPurityViolationAcceptanceFixture(): Promise<string> {
+  const projectRoot = await mkdtemp(join(tmpdir(), 'component-canvas-acceptance-purity-'));
+  tempDirs.push(projectRoot);
+
+  await mkdir(resolve(projectRoot, '.canvas', 'workflows', 'impure'), { recursive: true });
+  await mkdir(resolve(projectRoot, 'src', 'lib', 'components'), { recursive: true });
+  await mkdir(resolve(projectRoot, 'src', 'lib', 'stores'), { recursive: true });
+
+  await writeFile(resolve(projectRoot, 'canvas.config.ts'), 'export default { lib: "./src/lib" };\n', 'utf8');
+  await writeFile(
+    resolve(projectRoot, 'src', 'lib', 'stores', 'conversation.ts'),
+    'export const conversationTitle = "Impure conversation";\n',
+    'utf8'
+  );
+  await writeFile(
+    resolve(projectRoot, 'src', 'lib', 'components', 'Chat.svelte'),
+    [
+      '<script>',
+      "  import { conversationTitle } from '$lib/stores/conversation.ts';",
+      '</script>',
+      '',
+      '<div data-chat>{conversationTitle}</div>',
+      ''
+    ].join('\n'),
+    'utf8'
+  );
+  await writeFile(
+    resolve(projectRoot, '.canvas', 'workflows', 'impure', 'ImpureScreen.svelte'),
+    [
+      '<script>',
+      "  import Chat from '$lib/components/Chat.svelte';",
+      '</script>',
+      '',
+      '<Chat />',
+      ''
+    ].join('\n'),
+    'utf8'
+  );
+  await writeFile(
+    resolve(projectRoot, '.canvas', 'workflows', 'impure', '_flow.ts'),
+    [
+      'export default {',
+      "  id: 'impure',",
+      "  title: 'Impure Flow',",
+      '  screens: [',
+      '    {',
+      "      id: 'blocked',",
+      "      component: 'ImpureScreen.svelte',",
+      "      title: 'Blocked'",
+      '    }',
+      '  ],',
+      '  transitions: []',
+      '};',
+      ''
+    ].join('\n'),
+    'utf8'
+  );
+
+  return projectRoot;
+}
+
+async function createRenderCheckAcceptanceFixture(): Promise<string> {
+  const projectRoot = await mkdtemp(join(tmpdir(), 'component-canvas-acceptance-render-check-'));
+  tempDirs.push(projectRoot);
+
+  await mkdir(resolve(projectRoot, '.canvas', 'workflows', 'adopted'), { recursive: true });
+  await mkdir(resolve(projectRoot, '.canvas', 'workflows', 'broken'), { recursive: true });
+  await mkdir(resolve(projectRoot, '.canvas', 'workflows', 'prototype'), { recursive: true });
+  await mkdir(resolve(projectRoot, 'src', 'lib', 'components'), { recursive: true });
+
+  await writeFile(resolve(projectRoot, 'canvas.config.ts'), 'export default { lib: "./src/lib" };\n', 'utf8');
+
+  await writeFile(
+    resolve(projectRoot, 'src', 'lib', 'components', 'GreetingCard.svelte'),
+    [
+      '<script>',
+      "  export let message = 'Hello from $lib';",
+      '</script>',
+      '',
+      '<div data-greeting-card>{message}</div>',
+      ''
+    ].join('\n'),
+    'utf8'
+  );
+
+  await writeFile(
+    resolve(projectRoot, '.canvas', 'workflows', 'adopted', 'AdoptedScreen.svelte'),
+    [
+      '<script>',
+      "  import GreetingCard from '$lib/components/GreetingCard.svelte';",
+      '</script>',
+      '',
+      '<GreetingCard message="Acceptance render-check" />',
+      ''
+    ].join('\n'),
+    'utf8'
+  );
+
+  await writeFile(
+    resolve(projectRoot, '.canvas', 'workflows', 'adopted', '_flow.ts'),
+    [
+      'export default {',
+      "  id: 'adopted',",
+      "  title: 'Adopted Flow',",
+      '  screens: [',
+      '    {',
+      "      id: 'ready',",
+      "      component: 'AdoptedScreen.svelte',",
+      "      title: 'Ready'",
+      '    }',
+      '  ],',
+      '  transitions: []',
+      '};',
+      ''
+    ].join('\n'),
+    'utf8'
+  );
+
+  await writeFile(
+    resolve(projectRoot, '.canvas', 'workflows', 'broken', 'BrokenScreen.svelte'),
+    [
+      '<script>',
+      "  import { onMount } from 'svelte';",
+      "  import GreetingCard from '$lib/components/GreetingCard.svelte';",
+      '',
+      '  onMount(() => {',
+      "    throw new Error('Broken screen exploded');",
+      '  });',
+      '</script>',
+      '',
+      '<GreetingCard message="This screen should fail" />',
+      ''
+    ].join('\n'),
+    'utf8'
+  );
+
+  await writeFile(
+    resolve(projectRoot, '.canvas', 'workflows', 'broken', '_flow.ts'),
+    [
+      'export default {',
+      "  id: 'broken',",
+      "  title: 'Broken Flow',",
+      '  screens: [',
+      '    {',
+      "      id: 'crashed',",
+      "      component: 'BrokenScreen.svelte',",
+      "      title: 'Crashed'",
+      '    }',
+      '  ],',
+      '  transitions: []',
+      '};',
+      ''
+    ].join('\n'),
+    'utf8'
+  );
+
+  await writeFile(
+    resolve(projectRoot, '.canvas', 'workflows', 'prototype', 'LocalCard.svelte'),
+    '<div data-local-card>Prototype concept</div>\n',
+    'utf8'
+  );
+
+  await writeFile(
+    resolve(projectRoot, '.canvas', 'workflows', 'prototype', 'PrototypeScreen.svelte'),
+    [
+      '<script>',
+      "  import LocalCard from './LocalCard.svelte';",
+      '</script>',
+      '',
+      '<LocalCard />',
+      ''
+    ].join('\n'),
+    'utf8'
+  );
+
+  await writeFile(
+    resolve(projectRoot, '.canvas', 'workflows', 'prototype', '_flow.ts'),
+    [
+      'export default {',
+      "  id: 'prototype',",
+      "  title: 'Prototype Flow',",
+      '  screens: [',
+      '    {',
+      "      id: 'concept',",
+      "      component: 'PrototypeScreen.svelte',",
+      "      title: 'Concept'",
+      '    }',
+      '  ],',
+      '  transitions: []',
+      '};',
+      ''
+    ].join('\n'),
+    'utf8'
+  );
+
+  return projectRoot;
+}
+
 async function startDevCommand(cwd: string): Promise<StartedDevCommand> {
-  const child = spawn(process.execPath, [cliPath, 'dev', '--json'], {
+  const child = spawn('npx', ['tsx', cliPath, 'dev', '--json'], {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -471,58 +834,6 @@ function sortScreenshots(
 
     return left.screen.localeCompare(right.screen);
   });
-}
-
-function extractFirstJsonObject(source: string): string | null {
-  let start = -1;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-
-  for (let index = 0; index < source.length; index += 1) {
-    const character = source[index];
-
-    if (start === -1) {
-      if (character === '{') {
-        start = index;
-        depth = 1;
-      }
-
-      continue;
-    }
-
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (character === '\\') {
-        escaped = true;
-      } else if (character === '"') {
-        inString = false;
-      }
-
-      continue;
-    }
-
-    if (character === '"') {
-      inString = true;
-      continue;
-    }
-
-    if (character === '{') {
-      depth += 1;
-      continue;
-    }
-
-    if (character === '}') {
-      depth -= 1;
-
-      if (depth === 0) {
-        return source.slice(start, index + 1);
-      }
-    }
-  }
-
-  return null;
 }
 
 async function readJsonFile<T>(path: string): Promise<T> {

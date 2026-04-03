@@ -1,7 +1,8 @@
-import { constants } from 'node:fs';
-import { access, readdir } from 'node:fs/promises';
+import { readdir } from 'node:fs/promises';
 import { extname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+import { getErrorMessage, isNonEmptyString, isPlainObject, pathExists } from './utils.ts';
 
 export interface Screen {
   id: string;
@@ -244,31 +245,6 @@ function validateVariant(
   }
 }
 
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await access(path, constants.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function isObject(value: unknown): value is Record<PropertyKey, unknown> {
   return typeof value === 'object' && value !== null;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return isObject(value) && !Array.isArray(value);
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
-}
-
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return String(error);
 }

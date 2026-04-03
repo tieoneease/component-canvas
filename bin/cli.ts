@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
-import { constants } from 'node:fs';
-import { access, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 
 import { Command, InvalidArgumentError } from 'commander';
@@ -13,8 +12,16 @@ import {
   type ManifestError,
   type WorkflowManifest
 } from '../lib/manifest.ts';
+import { renderCheck, type RenderCheckResult } from '../lib/render-check.ts';
 import { createBrowserPool } from '../lib/screenshot.ts';
 import { startServer } from '../lib/server.ts';
+import {
+  escapeAttributeValue,
+  getErrorMessage,
+  isPlainObject,
+  pathExists,
+  sanitizePathSegment
+} from '../lib/utils.ts';
 
 interface JsonFlagOptions {
   json?: boolean;
@@ -30,6 +37,10 @@ interface ScreenshotCommandOptions extends JsonFlagOptions {
   screen?: string;
   all?: boolean;
   output?: string;
+}
+
+interface RenderCheckCommandOptions extends JsonFlagOptions {
+  workflow?: string;
 }
 
 interface InitCommandOptions extends JsonFlagOptions {}
@@ -247,6 +258,41 @@ program
   });
 
 program
+  .command('render-check')
+  .description('Render canvas screens and report pass/fail/prototype status.')
+  .argument('[workflow]', 'Workflow id to check')
+  .option('--workflow <id>', 'Workflow id to check (alternative to the positional argument)')
+  .option('--json', 'Output machine-readable JSON')
+  .action(async (workflowArgument: string | undefined, options: RenderCheckCommandOptions, command: Command) => {
+    await runCommand(command, async () => {
+      const workflowId = resolveRenderCheckWorkflow(workflowArgument, options.workflow);
+      const context = await resolveProjectContext(process.cwd(), { requireCanvas: true });
+      const server = await acquireServer(context);
+
+      try {
+        const result = await renderCheck({
+          canvasDir: context.canvasDir,
+          projectRoot: context.projectRoot,
+          workflowId,
+          serverUrl: server.url
+        });
+
+        if (options.json) {
+          writeJson(result);
+        } else {
+          process.stdout.write(`${formatRenderCheckTable(result)}\n${formatRenderCheckSummary(result)}\n`);
+        }
+
+        if (result.summary.fail > 0) {
+          process.exitCode = 1;
+        }
+      } finally {
+        await server.close();
+      }
+    });
+  });
+
+program
   .command('init')
   .description('Initialize component-canvas config and sample workflow files.')
   .option('--json', 'Output machine-readable JSON')
@@ -310,7 +356,7 @@ async function resolveProjectContext(
   while (true) {
     const configPath = join(currentDir, CANVAS_CONFIG_FILE_NAME);
     const defaultCanvasDir = join(currentDir, '.canvas');
-    const hasConfig = await fileExists(configPath);
+    const hasConfig = await pathExists(configPath);
     const hasCanvas = await directoryExists(defaultCanvasDir);
 
     if (hasConfig || hasCanvas) {
@@ -396,7 +442,10 @@ async function acquireServer(context: ProjectContext): Promise<ServerLease> {
     await removeRunningServerState(context);
   }
 
-  const server = await startServer(toServerOptions(context));
+  const server = await startServer({
+    ...toServerOptions(context),
+    logLevel: 'silent'
+  });
 
   return {
     url: server.url,
@@ -418,7 +467,7 @@ async function writeRunningServerState(context: ProjectContext, url: string): Pr
 async function readRunningServerState(context: ProjectContext): Promise<RunningServerState | null> {
   const statePath = resolve(context.canvasDir, DEV_SERVER_STATE_FILE);
 
-  if (!(await fileExists(statePath))) {
+  if (!(await pathExists(statePath))) {
     return null;
   }
 
@@ -478,16 +527,32 @@ function createWorkflowSummaries(workflows: WorkflowManifest[]): WorkflowSummary
 }
 
 function formatWorkflowTable(workflows: WorkflowSummary[]): string {
-  const headers = ['ID', 'TITLE', 'SCREENS', 'TRANSITIONS', 'VARIANTS'];
-  const rows = workflows.map((workflow) => [
-    workflow.id,
-    workflow.title,
-    String(workflow.screens),
-    String(workflow.transitions),
-    String(workflow.variants)
-  ]);
+  return formatTable(
+    ['ID', 'TITLE', 'SCREENS', 'TRANSITIONS', 'VARIANTS'],
+    workflows.map((workflow) => [
+      workflow.id,
+      workflow.title,
+      String(workflow.screens),
+      String(workflow.transitions),
+      String(workflow.variants)
+    ])
+  );
+}
+
+function formatRenderCheckTable(result: RenderCheckResult): string {
+  return formatTable(
+    ['WORKFLOW', 'SCREEN', 'STATUS'],
+    result.screens.map((screen) => [screen.workflow, screen.screen, screen.status])
+  );
+}
+
+function formatRenderCheckSummary(result: RenderCheckResult): string {
+  return `${result.summary.pass} passed, ${result.summary.fail} failed, ${result.summary.prototype} prototype`;
+}
+
+function formatTable(headers: string[], rows: string[][]): string {
   const widths = headers.map((header, index) => {
-    return Math.max(header.length, ...rows.map((row) => row[index].length));
+    return Math.max(header.length, ...rows.map((row) => row[index]?.length ?? 0));
   });
   const formatRow = (columns: string[]) => {
     return columns
@@ -536,6 +601,18 @@ function assertManifestSuccess(errors: ManifestError[]): void {
   );
 }
 
+function resolveRenderCheckWorkflow(
+  workflowArgument: string | undefined,
+  workflowOption: string | undefined
+): string | undefined {
+  if (workflowArgument && workflowOption && workflowArgument !== workflowOption) {
+    throw new CliError(
+      `Positional workflow id "${workflowArgument}" does not match --workflow "${workflowOption}".`
+    );
+  }
+
+  return workflowArgument ?? workflowOption;
+}
 
 function resolveScreenshotOutputRoot(context: ProjectContext, output?: string): string {
   if (output) {
@@ -543,16 +620,6 @@ function resolveScreenshotOutputRoot(context: ProjectContext, output?: string): 
   }
 
   return resolve(context.canvasDir, 'screenshots');
-}
-
-function sanitizePathSegment(value: string): string {
-  const sanitized = value.trim().replace(/[^a-zA-Z0-9._-]+/gu, '-').replace(/^-+|-+$/gu, '');
-
-  return sanitized.length > 0 ? sanitized : 'screen';
-}
-
-function escapeAttributeValue(value: string): string {
-  return value.replace(/\\/gu, '\\\\').replace(/"/gu, '\\"');
 }
 
 function parsePortOption(value: string): number {
@@ -590,15 +657,6 @@ async function waitForShutdownSignal(): Promise<'SIGINT' | 'SIGTERM'> {
   });
 }
 
-async function fileExists(path: string): Promise<boolean> {
-  try {
-    await access(path, constants.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function directoryExists(path: string): Promise<boolean> {
   try {
     const metadata = await stat(path);
@@ -624,16 +682,4 @@ function displayPath(path: string): string {
 
 function isManifestError(value: unknown): value is ManifestError {
   return isPlainObject(value) && typeof value.file === 'string' && typeof value.message === 'string';
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return String(error);
 }

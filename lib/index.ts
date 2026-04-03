@@ -1,6 +1,8 @@
+export * from './adapter.ts';
 export * from './config.ts';
 export * from './init.ts';
 export * from './manifest.ts';
+export * from './render-check.ts';
 export * from './screenshot.ts';
 export * from './server.ts';
 export { default as canvasVitePlugin } from './vite-plugin.ts';

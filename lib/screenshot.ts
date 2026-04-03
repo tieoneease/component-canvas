@@ -34,6 +34,8 @@ const DEFAULT_VIEWPORT: ScreenshotViewport = {
 };
 
 const DEFAULT_WAIT_FOR_SELECTOR = '#app';
+const RENDERABLE_SELECTOR_TIMEOUT_MS = 30_000;
+const RENDERABLE_SELECTOR_POLL_INTERVAL_MS = 100;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 export async function captureScreenshot(options: ScreenshotOptions): Promise<ScreenshotResult> {
@@ -84,12 +86,19 @@ async function captureWithBrowser(browser: Browser, options: ScreenshotOptions):
 
   try {
     const page = await context.newPage();
+    const pageErrors: string[] = [];
+
+    page.on('pageerror', (error) => {
+      pageErrors.push(error.message);
+    });
 
     await page.goto(options.url, { waitUntil: 'load' });
     await waitForRenderableSelector(page, waitForSelector);
+    await assertNoRenderErrors(page, pageErrors);
 
     if (options.selector && options.selector !== waitForSelector) {
       await waitForRenderableSelector(page, options.selector);
+      await assertNoRenderErrors(page, pageErrors);
     }
 
     if (options.selector) {
@@ -103,6 +112,7 @@ async function captureWithBrowser(browser: Browser, options: ScreenshotOptions):
       const padded = { width: Math.max(viewport.width, box.width + 100), height: Math.max(viewport.height, box.height + 200) };
       await page.setViewportSize(padded);
       await page.waitForTimeout(200);
+      await assertNoRenderErrors(page, pageErrors);
 
       await locator.screenshot({
         path: outputPath,
@@ -110,6 +120,9 @@ async function captureWithBrowser(browser: Browser, options: ScreenshotOptions):
         animations: 'disabled'
       });
     } else {
+      await page.waitForTimeout(50);
+      await assertNoRenderErrors(page, pageErrors);
+
       await page.screenshot({
         path: outputPath,
         type: 'png',
@@ -131,20 +144,77 @@ function normalizeViewport(viewport?: ScreenshotViewport): ScreenshotViewport {
 }
 
 async function waitForRenderableSelector(page: Page, selector: string): Promise<void> {
-  await page.waitForSelector(selector, { state: 'visible' });
-  await page.waitForFunction(
-    (targetSelector: string) => {
-      const element = document.querySelector(targetSelector);
+  const deadline = Date.now() + RENDERABLE_SELECTOR_TIMEOUT_MS;
 
-      if (!(element instanceof HTMLElement)) {
-        return false;
+  while (Date.now() < deadline) {
+    const viteError = await readViteErrorOverlayMessage(page);
+
+    if (viteError) {
+      throw new Error(viteError);
+    }
+
+    const isRenderable = await page
+      .evaluate((targetSelector: string) => {
+        const element = document.querySelector(targetSelector);
+
+        if (!(element instanceof HTMLElement)) {
+          return false;
+        }
+
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      }, selector)
+      .catch(() => false);
+
+    if (isRenderable) {
+      return;
+    }
+
+    await page.waitForTimeout(RENDERABLE_SELECTOR_POLL_INTERVAL_MS);
+  }
+
+  const viteError = await readViteErrorOverlayMessage(page);
+
+  if (viteError) {
+    throw new Error(viteError);
+  }
+
+  throw new Error(`Timed out waiting for selector ${selector} to render.`);
+}
+
+async function assertNoRenderErrors(page: Page, pageErrors: string[]): Promise<void> {
+  await page.waitForTimeout(50);
+
+  if (pageErrors.length > 0) {
+    throw new Error(pageErrors[0]);
+  }
+
+  const viteError = await readViteErrorOverlayMessage(page);
+
+  if (viteError) {
+    throw new Error(viteError);
+  }
+}
+
+async function readViteErrorOverlayMessage(page: Page): Promise<string | null> {
+  try {
+    return await page.evaluate(() => {
+      const overlay = document.querySelector('vite-error-overlay');
+
+      if (!(overlay instanceof HTMLElement)) {
+        return null;
       }
 
-      const rect = element.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    },
-    selector
-  );
+      const message = [overlay.textContent ?? '', overlay.shadowRoot?.textContent ?? '']
+        .join('\n')
+        .replace(/\s+/gu, ' ')
+        .trim();
+
+      return message.length > 0 ? message : 'Vite error overlay is visible.';
+    });
+  } catch {
+    return null;
+  }
 }
 
 async function readScreenshotResult(path: string): Promise<ScreenshotResult> {

@@ -19,23 +19,19 @@ describe('loadConfig', () => {
     const projectRoot = await mkdtemp(join(tmpdir(), 'component-canvas-config-'));
     tempDirs.push(projectRoot);
 
-    await writeFile(
-      resolve(projectRoot, 'canvas.config.ts'),
-      [
-        'export default {',
-        "  lib: './src/lib',",
-        "  globalCss: './src/global.css',",
-        '  mocks: {',
-        "    '$env/static/public': './.canvas/mocks/public.ts'",
-        '  },',
-        '  aliases: {',
-        "    '@shared': './src/shared'",
-        '  }',
-        '};',
-        ''
-      ].join('\n'),
-      'utf8'
-    );
+    await writeCanvasConfig(projectRoot, [
+      'export default {',
+      "  lib: './src/lib',",
+      "  globalCss: './src/global.css',",
+      '  mocks: {',
+      "    '$env/static/public': './.canvas/mocks/public.ts'",
+      '  },',
+      '  aliases: {',
+      "    '@shared': './src/shared'",
+      '  }',
+      '};',
+      ''
+    ]);
 
     await expect(loadConfig(projectRoot)).resolves.toEqual({
       lib: './src/lib',
@@ -46,6 +42,94 @@ describe('loadConfig', () => {
       aliases: {
         '@shared': './src/shared'
       }
+    });
+  });
+
+  it('loads a valid purity config', async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), 'component-canvas-config-purity-'));
+    tempDirs.push(projectRoot);
+
+    await writeCanvasConfig(projectRoot, [
+      'export default {',
+      '  purity: {',
+      "    componentPaths: ['$lib/components/', '$lib/marketing/'],",
+      "    forbiddenImports: ['$lib/stores/', '$app/navigation']",
+      '  }',
+      '};',
+      ''
+    ]);
+
+    await expect(loadConfig(projectRoot)).resolves.toEqual({
+      purity: {
+        componentPaths: ['$lib/components/', '$lib/marketing/'],
+        forbiddenImports: ['$lib/stores/', '$app/navigation']
+      }
+    });
+  });
+
+  it('rejects purity when it is not an object', async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), 'component-canvas-config-purity-invalid-'));
+    tempDirs.push(projectRoot);
+    const configPath = resolve(projectRoot, 'canvas.config.ts');
+
+    await writeCanvasConfig(projectRoot, ['export default { purity: "invalid" };', '']);
+
+    await expect(loadConfig(projectRoot)).rejects.toThrow(
+      `${configPath} field "purity" must be an object when provided.`
+    );
+  });
+
+  it('rejects purity.componentPaths entries that are not strings', async () => {
+    const projectRoot = await mkdtemp(
+      join(tmpdir(), 'component-canvas-config-purity-component-paths-invalid-')
+    );
+    tempDirs.push(projectRoot);
+    const configPath = resolve(projectRoot, 'canvas.config.ts');
+
+    await writeCanvasConfig(projectRoot, [
+      'export default {',
+      '  purity: {',
+      "    componentPaths: ['$lib/components/', 42],",
+      "    forbiddenImports: ['$lib/stores/']",
+      '  }',
+      '};',
+      ''
+    ]);
+
+    await expect(loadConfig(projectRoot)).rejects.toThrow(
+      `${configPath} field "purity.componentPaths[1]" must be a string.`
+    );
+  });
+
+  it('rejects purity when forbiddenImports is missing', async () => {
+    const projectRoot = await mkdtemp(
+      join(tmpdir(), 'component-canvas-config-purity-forbidden-imports-missing-')
+    );
+    tempDirs.push(projectRoot);
+    const configPath = resolve(projectRoot, 'canvas.config.ts');
+
+    await writeCanvasConfig(projectRoot, [
+      'export default {',
+      '  purity: {',
+      "    componentPaths: ['$lib/components/']",
+      '  }',
+      '};',
+      ''
+    ]);
+
+    await expect(loadConfig(projectRoot)).rejects.toThrow(
+      `${configPath} field "purity.forbiddenImports" must be a non-empty array of strings.`
+    );
+  });
+
+  it('loads successfully when purity is omitted', async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), 'component-canvas-config-no-purity-'));
+    tempDirs.push(projectRoot);
+
+    await writeCanvasConfig(projectRoot, ['export default { lib: "./src/lib" };', '']);
+
+    await expect(loadConfig(projectRoot)).resolves.toEqual({
+      lib: './src/lib'
     });
   });
 
@@ -113,6 +197,10 @@ describe('project mode server wiring', () => {
   );
 });
 
+async function writeCanvasConfig(projectRoot: string, lines: string[]): Promise<void> {
+  await writeFile(resolve(projectRoot, 'canvas.config.ts'), lines.join('\n'), 'utf8');
+}
+
 async function createProjectModeFixture(): Promise<string> {
   const projectRoot = await mkdtemp(join(tmpdir(), 'component-canvas-project-mode-'));
   tempDirs.push(projectRoot);
@@ -122,23 +210,19 @@ async function createProjectModeFixture(): Promise<string> {
   await mkdir(resolve(projectRoot, 'src', 'lib'), { recursive: true });
   await mkdir(resolve(projectRoot, 'src', 'shared'), { recursive: true });
 
-  await writeFile(
-    resolve(projectRoot, 'canvas.config.ts'),
-    [
-      'export default {',
-      "  lib: './src/lib',",
-      "  globalCss: './src/global.css',",
-      '  mocks: {',
-      "    '$env/static/public': './.canvas/mocks/public.ts'",
-      '  },',
-      '  aliases: {',
-      "    '@shared': './src/shared'",
-      '  }',
-      '};',
-      ''
-    ].join('\n'),
-    'utf8'
-  );
+  await writeCanvasConfig(projectRoot, [
+    'export default {',
+    "  lib: './src/lib',",
+    "  globalCss: './src/global.css',",
+    '  mocks: {',
+    "    '$env/static/public': './.canvas/mocks/public.ts'",
+    '  },',
+    '  aliases: {',
+    "    '@shared': './src/shared'",
+    '  }',
+    '};',
+    ''
+  ]);
 
   await writeFile(
     resolve(projectRoot, 'src', 'global.css'),

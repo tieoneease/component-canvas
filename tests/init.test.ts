@@ -21,7 +21,7 @@ describe('component-canvas init', () => {
 
     await mkdir(resolve(projectRoot, 'src', 'lib'), { recursive: true });
 
-    const { stdout, stderr } = await execFile('node', [cliPath, 'init', '--json'], {
+    const { stdout, stderr } = await execFile('npx', ['tsx', cliPath, 'init', '--json'], {
       cwd: projectRoot
     });
     const payload = JSON.parse(stdout);
@@ -41,7 +41,7 @@ describe('component-canvas init', () => {
     const projectRoot = await mkdtemp(join(tmpdir(), 'component-canvas-init-standalone-'));
     tempDirs.push(projectRoot);
 
-    const { stdout, stderr } = await execFile('node', [cliPath, 'init', '--json'], {
+    const { stdout, stderr } = await execFile('npx', ['tsx', cliPath, 'init', '--json'], {
       cwd: projectRoot
     });
     const payload = JSON.parse(stdout);

@@ -1,10 +1,17 @@
-import { constants } from 'node:fs';
-import { access, readdir } from 'node:fs/promises';
+import { readdir } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import { normalizePath, type Alias, type Plugin, type UserConfig, type ViteDevServer } from 'vite';
 
+import { SvelteAdapter, type ComponentEntry, type PurityConfig } from './adapter.ts';
 import { parseWorkflowManifests } from './manifest.ts';
+import {
+  importFreshModule,
+  isNonEmptyString,
+  isPlainObject,
+  pathExists,
+  toFsImportPath
+} from './utils.ts';
 
 export interface CanvasVitePluginOptions {
   canvasDir: string;
@@ -12,6 +19,7 @@ export interface CanvasVitePluginOptions {
   aliases?: Record<string, string>;
   mocks?: Record<string, string>;
   globalCss?: string;
+  purity?: PurityConfig;
 }
 
 const MANIFESTS_MODULE_ID = 'virtual:canvas-manifests';
@@ -22,12 +30,6 @@ const RESOLVED_MANIFESTS_MODULE_ID = '\0component-canvas:manifests';
 const RESOLVED_COMPONENTS_MODULE_ID = '\0component-canvas:components';
 const RESOLVED_GLOBAL_CSS_MODULE_ID = '\0component-canvas:global-css';
 
-
-interface ComponentModuleEntry {
-  key: string;
-  absolutePath: string;
-}
-
 export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plugin {
   const resolvedCanvasDir = resolve(options.canvasDir);
   const resolvedProjectRoot = options.projectRoot ? resolve(options.projectRoot) : undefined;
@@ -35,6 +37,13 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
   const resolvedAliases = createAliasEntries(options.aliases, baseDir);
   const resolvedMocks = createAliasEntries(options.mocks, baseDir);
   const resolvedGlobalCss = options.globalCss ? resolvePathOption(options.globalCss, baseDir) : undefined;
+  const purityAliases = [...resolvedMocks, ...resolvedAliases];
+  const resolvedPurityComponentPaths = options.purity
+    ? resolveIndexedPurityPaths(options.purity.componentPaths, purityAliases, baseDir)
+    : [];
+  const resolvedPurityForbiddenImportPaths = options.purity
+    ? resolvePurityPaths(options.purity.forbiddenImports, purityAliases, baseDir)
+    : [];
 
   return {
     name: 'component-canvas-vite-plugin',
@@ -62,7 +71,7 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
       return config;
     },
 
-    resolveId(source) {
+    resolveId(source, importer) {
       if (source === MANIFESTS_MODULE_ID) {
         return RESOLVED_MANIFESTS_MODULE_ID;
       }
@@ -75,10 +84,24 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
         return RESOLVED_GLOBAL_CSS_MODULE_ID;
       }
 
+      if (
+        importer &&
+        options.purity &&
+        isPurityViolation(
+          source,
+          importer,
+          options.purity,
+          resolvedPurityComponentPaths,
+          resolvedPurityForbiddenImportPaths
+        )
+      ) {
+        this.error(
+          formatPurityError(source, importer, options.purity, resolvedPurityComponentPaths)
+        );
+      }
+
       return null;
     },
-
-
 
     async load(id) {
       if (id === RESOLVED_MANIFESTS_MODULE_ID) {
@@ -136,17 +159,50 @@ async function loadManifestsModule(
 
 async function loadComponentsModule(canvasDir: string): Promise<string> {
   const components = await collectComponents(canvasDir);
-  const importLines = components.map((entry, index) => {
-    return `import Component${index} from ${JSON.stringify(toFsImportPath(entry.absolutePath))};`;
-  });
-  const objectEntries = components.map((entry, index) => {
-    return `  ${JSON.stringify(entry.key)}: Component${index}`;
-  });
+  const adapter = new SvelteAdapter();
+
+  return adapter.generateComponentModule(components);
+}
+
+export function isPurityViolation(
+  source: string,
+  importer: string,
+  rules: PurityConfig,
+  resolvedComponentPaths: Array<string | undefined>,
+  resolvedForbiddenImportPaths: string[] = []
+): boolean {
+  if (findMatchedPurityComponentPathIndex(importer, resolvedComponentPaths) < 0) {
+    return false;
+  }
+
+  return (
+    rules.forbiddenImports.some((forbiddenImport) => matchesSpecifierPrefix(source, forbiddenImport)) ||
+    resolvedForbiddenImportPaths.some((forbiddenImportPath) =>
+      matchesResolvedSpecifierPath(source, importer, forbiddenImportPath)
+    )
+  );
+}
+
+export function formatPurityError(
+  source: string,
+  importer: string,
+  rules: PurityConfig,
+  resolvedComponentPaths: Array<string | undefined> = []
+): string {
+  const matchedComponentPathIndex = findMatchedPurityComponentPathIndex(importer, resolvedComponentPaths);
+  const matchedComponentPath =
+    (matchedComponentPathIndex >= 0 ? rules.componentPaths[matchedComponentPathIndex] : undefined) ??
+    rules.componentPaths[0] ??
+    '<unknown>';
+  const matchedForbiddenImport =
+    rules.forbiddenImports.find((forbiddenImport) => matchesSpecifierPrefix(source, forbiddenImport)) ??
+    rules.forbiddenImports[0] ??
+    source;
 
   return [
-    ...importLines,
-    `const components = ${objectEntries.length > 0 ? `\n{\n${objectEntries.join(',\n')}\n}` : '{}'};`,
-    'export default components;'
+    `Purity violation: ${importer} cannot import from '${source}'`,
+    `  Rule: components in '${matchedComponentPath}' may not import from '${matchedForbiddenImport}'`,
+    '  Fix: lift this import to the page shell that renders this component.'
   ].join('\n');
 }
 
@@ -160,7 +216,7 @@ function loadGlobalCssModule(globalCssPath?: string): string {
   return [`import ${JSON.stringify(fsImportPath)};`, `export default ${JSON.stringify(fsImportPath)};`].join('\n');
 }
 
-async function collectComponents(canvasDir: string): Promise<ComponentModuleEntry[]> {
+async function collectComponents(canvasDir: string): Promise<ComponentEntry[]> {
   const workflowsDir = resolve(canvasDir, 'workflows');
 
   if (!(await pathExists(workflowsDir))) {
@@ -173,7 +229,7 @@ async function collectComponents(canvasDir: string): Promise<ComponentModuleEntr
     .map((entry) => join(workflowsDir, entry.name))
     .sort((left, right) => left.localeCompare(right));
 
-  const components: ComponentModuleEntry[] = [];
+  const components: ComponentEntry[] = [];
 
   for (const workflowDir of workflowDirs) {
     const workflowId = await resolveWorkflowId(workflowDir);
@@ -240,6 +296,42 @@ function createAliasEntries(entries: Record<string, string> | undefined, baseDir
   }));
 }
 
+function resolveIndexedPurityPaths(
+  paths: string[],
+  aliases: Alias[],
+  baseDir: string
+): Array<string | undefined> {
+  return paths.map((path) => resolvePurityPath(path, aliases, baseDir));
+}
+
+function resolvePurityPaths(paths: string[], aliases: Alias[], baseDir: string): string[] {
+  return uniqueStrings(paths.map((path) => resolvePurityPath(path, aliases, baseDir)));
+}
+
+function resolvePurityPath(path: string, aliases: Alias[], baseDir: string): string | undefined {
+  const matchedAlias = aliases.find(
+    (alias): alias is Alias & { find: string; replacement: string } =>
+      typeof alias.find === 'string' &&
+      typeof alias.replacement === 'string' &&
+      matchesSpecifierPrefix(path, alias.find)
+  );
+
+  if (matchedAlias) {
+    if (!isAbsolute(matchedAlias.replacement)) {
+      return undefined;
+    }
+
+    const suffix = path.slice(matchedAlias.find.length).replace(/^\/+/, '');
+    return normalizePath(suffix.length > 0 ? resolve(matchedAlias.replacement, suffix) : resolve(matchedAlias.replacement));
+  }
+
+  if (isAbsolute(path) || path.startsWith('.')) {
+    return normalizePath(resolve(baseDir, path));
+  }
+
+  return undefined;
+}
+
 function resolvePathOption(value: string, baseDir: string): string {
   if (isAbsolute(value) || value.startsWith('.')) {
     return resolve(baseDir, value);
@@ -252,6 +344,39 @@ function uniqueStrings(values: Array<string | undefined>): string[] {
   return [...new Set(values.filter((value): value is string => value !== undefined))];
 }
 
+function matchesSpecifierPrefix(source: string, prefix: string): boolean {
+  if (prefix.endsWith('/')) {
+    return source.startsWith(prefix);
+  }
+
+  return source === prefix || source.startsWith(`${prefix}/`);
+}
+
+function matchesResolvedSpecifierPath(source: string, importer: string, directory: string): boolean {
+  const resolvedSource = resolveSpecifierPath(source, importer);
+
+  return resolvedSource ? isPathInside(resolvedSource, directory) : false;
+}
+
+function resolveSpecifierPath(source: string, importer: string): string | undefined {
+  const sourceWithoutQuery = source.split('?')[0];
+
+  if (sourceWithoutQuery.startsWith('/@fs/')) {
+    return normalizePath(sourceWithoutQuery.slice('/@fs/'.length));
+  }
+
+  if (isAbsolute(sourceWithoutQuery)) {
+    return normalizePath(resolve(sourceWithoutQuery));
+  }
+
+  if (sourceWithoutQuery.startsWith('.')) {
+    const importerWithoutQuery = importer.split('?')[0];
+    return normalizePath(resolve(dirname(importerWithoutQuery), sourceWithoutQuery));
+  }
+
+  return undefined;
+}
+
 function invalidateVirtualModule(server: ViteDevServer, moduleId: string): void {
   const module = server.moduleGraph.getModuleById(moduleId);
 
@@ -260,8 +385,13 @@ function invalidateVirtualModule(server: ViteDevServer, moduleId: string): void 
   }
 }
 
-function toFsImportPath(path: string): string {
-  return `/@fs/${normalizePath(resolve(path))}`;
+function findMatchedPurityComponentPathIndex(
+  importer: string,
+  resolvedComponentPaths: Array<string | undefined>
+): number {
+  return resolvedComponentPaths.findIndex(
+    (componentPath) => componentPath !== undefined && isPathInside(importer, componentPath)
+  );
 }
 
 function isPathInside(path: string, directory: string): boolean {
@@ -269,17 +399,6 @@ function isPathInside(path: string, directory: string): boolean {
   const normalizedDirectory = normalizePath(resolve(directory));
 
   return normalizedPath === normalizedDirectory || normalizedPath.startsWith(`${normalizedDirectory}/`);
-}
-
-async function importFreshModule(modulePath: string): Promise<unknown> {
-  const { pathToFileURL } = await import('node:url');
-  const { stat } = await import('node:fs/promises');
-  const moduleUrl = pathToFileURL(modulePath);
-  const stats = await stat(modulePath);
-
-  moduleUrl.searchParams.set('t', String(stats.mtimeMs));
-
-  return import(moduleUrl.href);
 }
 
 function getDefaultExport(module: unknown): unknown {
@@ -290,19 +409,3 @@ function getDefaultExport(module: unknown): unknown {
   return undefined;
 }
 
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await access(path, constants.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
-}
