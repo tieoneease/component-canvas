@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 
-import type { Plugin } from 'vite';
+import type { Plugin, UserConfig } from 'vite';
 
 import { isPlainObject, pathExists } from './utils.ts';
 
@@ -47,6 +47,43 @@ export function resolveFromProject(
   return {
     name: 'resolve-from-project',
     enforce: 'pre',
+
+    async config(): Promise<UserConfig> {
+      const nodeModulesDir = await (nodeModulesDirPromise ??= findNearestNodeModulesDir(
+        projectRoot,
+        fallbackSearchPaths
+      ));
+
+      if (!nodeModulesDir) {
+        return {};
+      }
+
+      // Exclude targeted packages from Vite's dependency optimizer (esbuild).
+      // esbuild doesn't follow package.json exports maps — it resolves
+      // svelte/internal/client as a filesystem path instead of reading the
+      // exports entry (./src/internal/client/index.js). This breaks under pnpm
+      // symlinks and any package using subpath exports. By excluding these
+      // packages from pre-bundling, all resolution goes through our resolveId
+      // hook which handles exports maps correctly.
+      const exclude: string[] = [];
+      const dedupe: string[] = [];
+
+      for (const packageName of targetedPackages) {
+        const packageDir = resolve(nodeModulesDir, ...packageName.split('/'));
+        if (!(await pathExists(packageDir))) continue;
+        exclude.push(packageName);
+        dedupe.push(packageName);
+      }
+
+      return {
+        resolve: {
+          dedupe: dedupe.length > 0 ? dedupe : undefined
+        },
+        optimizeDeps: {
+          exclude: exclude.length > 0 ? exclude : undefined
+        }
+      };
+    },
 
     async resolveId(source) {
       if (!matchesTargetedPackage(source, targetedPackages)) {

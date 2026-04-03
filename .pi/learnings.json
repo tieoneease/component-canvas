@@ -1,0 +1,12 @@
+{
+  "learnings": [
+    {
+      "id": "ff78dd783f2c",
+      "text": "pnpm + esbuild doesn't follow package.json exports maps correctly — `svelte/internal/client` resolves as a directory path instead of following exports to `./src/internal/client/index.js`. Vite's dev server handles exports maps fine; esbuild-direct code paths need the custom resolveFromProject plugin or equivalent workaround.",
+      "scope": "project",
+      "occurrences": 1,
+      "created": "2026-04-03T18:46:22.813Z",
+      "lastSeen": "2026-04-03T18:46:22.813Z"
+    }
+  ]
+}
