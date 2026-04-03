@@ -31,8 +31,12 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
   const resolvedAliases = createAliasEntries(options.aliases, baseDir);
   const resolvedMocks = createAliasEntries(options.mocks, baseDir);
   const resolvedGlobalCss = options.globalCss ? resolvePathOption(options.globalCss, baseDir) : undefined;
+  const purityAliases = [...resolvedMocks, ...resolvedAliases];
   const resolvedPurityComponentPaths = options.purity
-    ? resolvePurityComponentPaths(options.purity.componentPaths, [...resolvedMocks, ...resolvedAliases], baseDir)
+    ? resolvePurityPaths(options.purity.componentPaths, purityAliases, baseDir)
+    : [];
+  const resolvedPurityForbiddenImportPaths = options.purity
+    ? resolvePurityPaths(options.purity.forbiddenImports, purityAliases, baseDir)
     : [];
 
   return {
@@ -77,7 +81,13 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
       if (
         importer &&
         options.purity &&
-        isPurityViolation(source, importer, options.purity, resolvedPurityComponentPaths)
+        isPurityViolation(
+          source,
+          importer,
+          options.purity,
+          resolvedPurityComponentPaths,
+          resolvedPurityForbiddenImportPaths
+        )
       ) {
         this.error(formatPurityError(source, importer, options.purity));
       }
@@ -150,13 +160,19 @@ export function isPurityViolation(
   source: string,
   importer: string,
   rules: PurityConfig,
-  resolvedComponentPaths: string[]
+  resolvedComponentPaths: string[],
+  resolvedForbiddenImportPaths: string[] = []
 ): boolean {
   if (!resolvedComponentPaths.some((componentPath) => isPathInside(importer, componentPath))) {
     return false;
   }
 
-  return rules.forbiddenImports.some((forbiddenImport) => matchesSpecifierPrefix(source, forbiddenImport));
+  return (
+    rules.forbiddenImports.some((forbiddenImport) => matchesSpecifierPrefix(source, forbiddenImport)) ||
+    resolvedForbiddenImportPaths.some((forbiddenImportPath) =>
+      matchesResolvedSpecifierPath(source, importer, forbiddenImportPath)
+    )
+  );
 }
 
 export function formatPurityError(source: string, importer: string, rules: PurityConfig): string {
@@ -263,28 +279,20 @@ function createAliasEntries(entries: Record<string, string> | undefined, baseDir
   }));
 }
 
-function resolvePurityComponentPaths(
-  componentPaths: string[],
-  aliases: Alias[],
-  baseDir: string
-): string[] {
+function resolvePurityPaths(paths: string[], aliases: Alias[], baseDir: string): string[] {
   return uniqueStrings(
-    componentPaths
-      .map((componentPath) => resolvePurityComponentPath(componentPath, aliases, baseDir))
-      .filter((componentPath): componentPath is string => componentPath !== undefined)
+    paths
+      .map((path) => resolvePurityPath(path, aliases, baseDir))
+      .filter((path): path is string => path !== undefined)
   );
 }
 
-function resolvePurityComponentPath(
-  componentPath: string,
-  aliases: Alias[],
-  baseDir: string
-): string | undefined {
+function resolvePurityPath(path: string, aliases: Alias[], baseDir: string): string | undefined {
   const matchedAlias = aliases.find(
     (alias): alias is Alias & { find: string; replacement: string } =>
       typeof alias.find === 'string' &&
       typeof alias.replacement === 'string' &&
-      matchesSpecifierPrefix(componentPath, alias.find)
+      matchesSpecifierPrefix(path, alias.find)
   );
 
   if (matchedAlias) {
@@ -292,12 +300,12 @@ function resolvePurityComponentPath(
       return undefined;
     }
 
-    const suffix = componentPath.slice(matchedAlias.find.length).replace(/^\/+/, '');
+    const suffix = path.slice(matchedAlias.find.length).replace(/^\/+/, '');
     return normalizePath(suffix.length > 0 ? resolve(matchedAlias.replacement, suffix) : resolve(matchedAlias.replacement));
   }
 
-  if (isAbsolute(componentPath) || componentPath.startsWith('.')) {
-    return normalizePath(resolve(baseDir, componentPath));
+  if (isAbsolute(path) || path.startsWith('.')) {
+    return normalizePath(resolve(baseDir, path));
   }
 
   return undefined;
@@ -321,6 +329,31 @@ function matchesSpecifierPrefix(source: string, prefix: string): boolean {
   }
 
   return source === prefix || source.startsWith(`${prefix}/`);
+}
+
+function matchesResolvedSpecifierPath(source: string, importer: string, directory: string): boolean {
+  const resolvedSource = resolveSpecifierPath(source, importer);
+
+  return resolvedSource ? isPathInside(resolvedSource, directory) : false;
+}
+
+function resolveSpecifierPath(source: string, importer: string): string | undefined {
+  const sourceWithoutQuery = source.split('?')[0];
+
+  if (sourceWithoutQuery.startsWith('/@fs/')) {
+    return normalizePath(sourceWithoutQuery.slice('/@fs/'.length));
+  }
+
+  if (isAbsolute(sourceWithoutQuery)) {
+    return normalizePath(resolve(sourceWithoutQuery));
+  }
+
+  if (sourceWithoutQuery.startsWith('.')) {
+    const importerWithoutQuery = importer.split('?')[0];
+    return normalizePath(resolve(dirname(importerWithoutQuery), sourceWithoutQuery));
+  }
+
+  return undefined;
 }
 
 function invalidateVirtualModule(server: ViteDevServer, moduleId: string): void {

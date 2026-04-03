@@ -15,6 +15,7 @@ export interface ServerOptions {
   aliases?: Record<string, string>;
   mocks?: Record<string, string>;
   globalCss?: string;
+  logLevel?: 'info' | 'warn' | 'error' | 'silent';
 }
 
 export interface StartedServer {
@@ -56,6 +57,7 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
     server = await createServer({
       root: appDir,
       configFile: appConfigFile,
+      logLevel: options.logLevel,
       plugins: [canvasVitePlugin(canvasPluginOptions)],
       server: {
         host: '127.0.0.1',

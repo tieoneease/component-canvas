@@ -30,6 +30,22 @@ describe('isPurityViolation', () => {
     ).toBe(true);
   });
 
+  it('returns true when a component import has already been resolved to a filesystem path', () => {
+    const importer = resolve(fixturesDir, 'valid-workflow/src/lib/components/Chat.svelte');
+    const resolvedStorePath = resolve(fixturesDir, 'valid-workflow/src/lib/stores/conversation.ts');
+    const resolvedStoreDirectory = `${resolve(fixturesDir, 'valid-workflow/src/lib/stores')}/`;
+
+    expect(
+      isPurityViolation('../stores/conversation.ts', importer, purityRules, [componentPath], [resolvedStoreDirectory])
+    ).toBe(true);
+    expect(
+      isPurityViolation(resolvedStorePath, importer, purityRules, [componentPath], [resolvedStoreDirectory])
+    ).toBe(true);
+    expect(
+      isPurityViolation(`/@fs/${resolvedStorePath}`, importer, purityRules, [componentPath], [resolvedStoreDirectory])
+    ).toBe(true);
+  });
+
   it('returns false when a component import is allowed', () => {
     const importer = resolve(fixturesDir, 'valid-workflow/src/lib/components/Chat.svelte');
 
