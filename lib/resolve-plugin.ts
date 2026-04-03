@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 
 import type { Plugin, UserConfig } from 'vite';
@@ -58,29 +58,76 @@ export function resolveFromProject(
         return {};
       }
 
-      // Exclude targeted packages from Vite's dependency optimizer (esbuild).
-      // esbuild doesn't follow package.json exports maps — it resolves
-      // svelte/internal/client as a filesystem path instead of reading the
-      // exports entry (./src/internal/client/index.js). This breaks under pnpm
-      // symlinks and any package using subpath exports. By excluding these
-      // packages from pre-bundling, all resolution goes through our resolveId
-      // hook which handles exports maps correctly.
-      const exclude: string[] = [];
+      // Two-layer fix for pnpm + esbuild + package.json exports maps.
+      //
+      // Problem: esbuild doesn't follow package.json exports maps. It resolves
+      // `svelte/internal/client` as a literal filesystem path instead of reading
+      // `exports["./internal/client"]` → `./src/internal/client/index.js`.
+      // Under pnpm (where node_modules/svelte is a symlink into .pnpm/), this
+      // breaks completely.
+      //
+      // Layer 1 (esbuild plugin): Inject a custom esbuild resolver into
+      // optimizeDeps that intercepts targeted package imports and resolves them
+      // using our exports-map logic. This runs inside esbuild's own pipeline,
+      // so dep pre-bundling works correctly.
+      //
+      // Layer 2 (resolve.dedupe + alias): Point Vite's resolver at the real
+      // (symlink-dereferenced) package directory so Vite itself doesn't trip
+      // over pnpm's symlink structure.
+      //
+      // The Vite resolveId hook (below) handles runtime module serving. These
+      // config-level settings handle esbuild dep optimization.
+
       const dedupe: string[] = [];
+      const alias: Array<{ find: string | RegExp; replacement: string }> = [];
+      const esbuildResolveCache = createResolveFromExportsCache();
+      const resolvedNodeModulesDir = nodeModulesDir;
 
       for (const packageName of targetedPackages) {
         const packageDir = resolve(nodeModulesDir, ...packageName.split('/'));
         if (!(await pathExists(packageDir))) continue;
-        exclude.push(packageName);
+
         dedupe.push(packageName);
+
+        // Dereference pnpm symlinks so Vite sees the real path
+        try {
+          const realDir = await realpath(packageDir);
+          if (realDir !== resolve(packageDir)) {
+            alias.push({ find: packageName, replacement: realDir });
+          }
+        } catch {
+          // Can't dereference — resolveId hook will handle it
+        }
       }
+
+      // Build a regex filter for the esbuild plugin: match any targeted package
+      // import (bare specifier or subpath like svelte/internal/client)
+      const escapedNames = targetedPackages.map((name) => escapeRegExp(name));
+      const esbuildFilter = new RegExp(`^(?:${escapedNames.join('|')})(?:/|$)`);
 
       return {
         resolve: {
-          dedupe: dedupe.length > 0 ? dedupe : undefined
+          dedupe: dedupe.length > 0 ? dedupe : undefined,
+          alias: alias.length > 0 ? alias : undefined
         },
         optimizeDeps: {
-          exclude: exclude.length > 0 ? exclude : undefined
+          esbuildOptions: {
+            plugins: [
+              {
+                name: 'canvas-resolve-project-exports',
+                setup(build) {
+                  build.onResolve({ filter: esbuildFilter }, async (args) => {
+                    const resolved = await resolveFromExports(
+                      resolvedNodeModulesDir,
+                      args.path,
+                      esbuildResolveCache
+                    );
+                    return resolved ? { path: resolved } : undefined;
+                  });
+                }
+              }
+            ]
+          }
         }
       };
     },
