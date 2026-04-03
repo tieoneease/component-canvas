@@ -46,6 +46,7 @@ export interface RenderCheckResult {
 
 interface ServerLease {
   url: string;
+  previewUrl?: string;
   close: () => Promise<void>;
 }
 
@@ -108,7 +109,8 @@ export async function renderCheck(options: RenderCheckOptions): Promise<RenderCh
           );
           screenshotIndex += 1;
           const selector = `[data-isolated-screen="${escapeAttributeValue(screen.id)}"]`;
-          const url = `${ensureTrailingSlash(serverLease.url)}#/screen/${encodeURIComponent(workflow.id)}/${encodeURIComponent(screen.id)}`;
+          const baseUrl = ensureTrailingSlash(serverLease.previewUrl ?? serverLease.url);
+          const url = `${baseUrl}#/screen/${encodeURIComponent(workflow.id)}/${encodeURIComponent(screen.id)}`;
 
           await browserPool.capture({
             url,
