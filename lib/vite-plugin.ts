@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 
 import { normalizePath, type Alias, type Plugin, type UserConfig, type ViteDevServer } from 'vite';
 
-import { SvelteAdapter, type ComponentEntry } from './adapter.ts';
+import { SvelteAdapter, type ComponentEntry, type PurityConfig } from './adapter.ts';
 import { parseWorkflowManifests } from './manifest.ts';
 
 export interface CanvasVitePluginOptions {
@@ -13,6 +13,7 @@ export interface CanvasVitePluginOptions {
   aliases?: Record<string, string>;
   mocks?: Record<string, string>;
   globalCss?: string;
+  purity?: PurityConfig;
 }
 
 const MANIFESTS_MODULE_ID = 'virtual:canvas-manifests';
@@ -30,6 +31,9 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
   const resolvedAliases = createAliasEntries(options.aliases, baseDir);
   const resolvedMocks = createAliasEntries(options.mocks, baseDir);
   const resolvedGlobalCss = options.globalCss ? resolvePathOption(options.globalCss, baseDir) : undefined;
+  const resolvedPurityComponentPaths = options.purity
+    ? resolvePurityComponentPaths(options.purity.componentPaths, [...resolvedMocks, ...resolvedAliases], baseDir)
+    : [];
 
   return {
     name: 'component-canvas-vite-plugin',
@@ -57,7 +61,7 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
       return config;
     },
 
-    resolveId(source) {
+    resolveId(source, importer) {
       if (source === MANIFESTS_MODULE_ID) {
         return RESOLVED_MANIFESTS_MODULE_ID;
       }
@@ -68,6 +72,14 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
 
       if (source === GLOBAL_CSS_MODULE_ID) {
         return RESOLVED_GLOBAL_CSS_MODULE_ID;
+      }
+
+      if (
+        importer &&
+        options.purity &&
+        isPurityViolation(source, importer, options.purity, resolvedPurityComponentPaths)
+      ) {
+        this.error(formatPurityError(source, importer, options.purity));
       }
 
       return null;
@@ -132,6 +144,33 @@ async function loadComponentsModule(canvasDir: string): Promise<string> {
   const adapter = new SvelteAdapter();
 
   return adapter.generateComponentModule(components);
+}
+
+export function isPurityViolation(
+  source: string,
+  importer: string,
+  rules: PurityConfig,
+  resolvedComponentPaths: string[]
+): boolean {
+  if (!resolvedComponentPaths.some((componentPath) => isPathInside(importer, componentPath))) {
+    return false;
+  }
+
+  return rules.forbiddenImports.some((forbiddenImport) => matchesSpecifierPrefix(source, forbiddenImport));
+}
+
+export function formatPurityError(source: string, importer: string, rules: PurityConfig): string {
+  const matchedComponentPath = rules.componentPaths[0] ?? '<unknown>';
+  const matchedForbiddenImport =
+    rules.forbiddenImports.find((forbiddenImport) => matchesSpecifierPrefix(source, forbiddenImport)) ??
+    rules.forbiddenImports[0] ??
+    source;
+
+  return [
+    `Purity violation: ${importer} cannot import from '${source}'`,
+    `  Rule: components in '${matchedComponentPath}' may not import from '${matchedForbiddenImport}'`,
+    '  Fix: lift this import to the page shell that renders this component.'
+  ].join('\n');
 }
 
 function loadGlobalCssModule(globalCssPath?: string): string {
@@ -224,6 +263,46 @@ function createAliasEntries(entries: Record<string, string> | undefined, baseDir
   }));
 }
 
+function resolvePurityComponentPaths(
+  componentPaths: string[],
+  aliases: Alias[],
+  baseDir: string
+): string[] {
+  return uniqueStrings(
+    componentPaths
+      .map((componentPath) => resolvePurityComponentPath(componentPath, aliases, baseDir))
+      .filter((componentPath): componentPath is string => componentPath !== undefined)
+  );
+}
+
+function resolvePurityComponentPath(
+  componentPath: string,
+  aliases: Alias[],
+  baseDir: string
+): string | undefined {
+  const matchedAlias = aliases.find(
+    (alias): alias is Alias & { find: string; replacement: string } =>
+      typeof alias.find === 'string' &&
+      typeof alias.replacement === 'string' &&
+      matchesSpecifierPrefix(componentPath, alias.find)
+  );
+
+  if (matchedAlias) {
+    if (!isAbsolute(matchedAlias.replacement)) {
+      return undefined;
+    }
+
+    const suffix = componentPath.slice(matchedAlias.find.length).replace(/^\/+/, '');
+    return normalizePath(suffix.length > 0 ? resolve(matchedAlias.replacement, suffix) : resolve(matchedAlias.replacement));
+  }
+
+  if (isAbsolute(componentPath) || componentPath.startsWith('.')) {
+    return normalizePath(resolve(baseDir, componentPath));
+  }
+
+  return undefined;
+}
+
 function resolvePathOption(value: string, baseDir: string): string {
   if (isAbsolute(value) || value.startsWith('.')) {
     return resolve(baseDir, value);
@@ -234,6 +313,14 @@ function resolvePathOption(value: string, baseDir: string): string {
 
 function uniqueStrings(values: Array<string | undefined>): string[] {
   return [...new Set(values.filter((value): value is string => value !== undefined))];
+}
+
+function matchesSpecifierPrefix(source: string, prefix: string): boolean {
+  if (prefix.endsWith('/')) {
+    return source.startsWith(prefix);
+  }
+
+  return source === prefix || source.startsWith(`${prefix}/`);
 }
 
 function invalidateVirtualModule(server: ViteDevServer, moduleId: string): void {
