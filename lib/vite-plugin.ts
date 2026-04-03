@@ -1,11 +1,30 @@
 import { readdir } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 
-import { normalizePath, type Alias, type Plugin, type UserConfig, type ViteDevServer } from 'vite';
+import {
+  normalizePath,
+  type Alias,
+  type Connect,
+  type Plugin,
+  type UserConfig,
+  type ViteDevServer
+} from 'vite';
 
 import { SvelteAdapter, type ComponentEntry, type PurityConfig } from './adapter.ts';
-import { parseWorkflowManifests } from './manifest.ts';
 import {
+  getRenderIdFromResolvedModuleId,
+  RENDER_MODULE_ID_PREFIX,
+  RESOLVED_RENDER_MODULE_ID_PREFIX,
+  type RenderRegistry
+} from './render.ts';
+import {
+  type ParseWorkflowManifestsResult,
+  parseWorkflowManifests
+} from './manifest.ts';
+import {
+  getErrorMessage,
+  getRequestPath,
   importFreshModule,
   isNonEmptyString,
   isPlainObject,
@@ -20,15 +39,34 @@ export interface CanvasVitePluginOptions {
   mocks?: Record<string, string>;
   globalCss?: string;
   purity?: PurityConfig;
+  renderRegistry?: RenderRegistry;
+  manifestStreamStore?: ManifestStreamStore;
 }
 
 const MANIFESTS_MODULE_ID = 'virtual:canvas-manifests';
 const COMPONENTS_MODULE_ID = 'virtual:canvas-components';
 const GLOBAL_CSS_MODULE_ID = 'virtual:canvas-global-css';
+const PREVIEW_MODULE_ID = 'virtual:canvas-preview';
 
 const RESOLVED_MANIFESTS_MODULE_ID = '\0component-canvas:manifests';
 const RESOLVED_COMPONENTS_MODULE_ID = '\0component-canvas:components';
 const RESOLVED_GLOBAL_CSS_MODULE_ID = '\0component-canvas:global-css';
+const RESOLVED_PREVIEW_MODULE_ID = '\0component-canvas:preview';
+
+export interface ManifestStreamState {
+  connections: Set<ServerResponse>;
+}
+
+export type ManifestStreamStore = Map<string, ManifestStreamState>;
+
+export interface ManifestMiddlewareOptions {
+  canvasDir: string;
+  manifestStreamStore?: ManifestStreamStore;
+}
+
+export function createManifestStreamStore(): ManifestStreamStore {
+  return new Map<string, ManifestStreamState>();
+}
 
 export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plugin {
   const resolvedCanvasDir = resolve(options.canvasDir);
@@ -37,6 +75,7 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
   const resolvedAliases = createAliasEntries(options.aliases, baseDir);
   const resolvedMocks = createAliasEntries(options.mocks, baseDir);
   const resolvedGlobalCss = options.globalCss ? resolvePathOption(options.globalCss, baseDir) : undefined;
+  const manifestStreamStore = options.manifestStreamStore ?? createManifestStreamStore();
   const purityAliases = [...resolvedMocks, ...resolvedAliases];
   const resolvedPurityComponentPaths = options.purity
     ? resolveIndexedPurityPaths(options.purity.componentPaths, purityAliases, baseDir)
@@ -50,8 +89,11 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
     enforce: 'pre',
 
     config(): UserConfig {
-      const allow = uniqueStrings([resolvedCanvasDir, resolvedProjectRoot, resolvedGlobalCss]);
-      const alias = [...resolvedMocks, ...resolvedAliases];
+      const allow = uniqueStrings([
+        resolvedCanvasDir,
+        resolvedProjectRoot,
+        toAllowPath(resolvedGlobalCss)
+      ]);
       const config: UserConfig = {};
 
       if (allow.length > 0) {
@@ -59,12 +101,6 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
           fs: {
             allow
           }
-        };
-      }
-
-      if (alias.length > 0) {
-        config.resolve = {
-          alias
         };
       }
 
@@ -84,6 +120,14 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
         return RESOLVED_GLOBAL_CSS_MODULE_ID;
       }
 
+      if (source === PREVIEW_MODULE_ID) {
+        return RESOLVED_PREVIEW_MODULE_ID;
+      }
+
+      if (source.startsWith(RENDER_MODULE_ID_PREFIX)) {
+        return `${RESOLVED_RENDER_MODULE_ID_PREFIX}${source.slice(RENDER_MODULE_ID_PREFIX.length)}`;
+      }
+
       if (
         importer &&
         options.purity &&
@@ -100,6 +144,12 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
         );
       }
 
+      const mockedSource = resolveAliasedPath(source, resolvedMocks);
+
+      if (mockedSource) {
+        return mockedSource;
+      }
+
       return null;
     },
 
@@ -114,6 +164,16 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
 
       if (id === RESOLVED_GLOBAL_CSS_MODULE_ID) {
         return loadGlobalCssModule(resolvedGlobalCss);
+      }
+
+      if (id === RESOLVED_PREVIEW_MODULE_ID) {
+        return loadPreviewModule();
+      }
+
+      const renderId = getRenderIdFromResolvedModuleId(id);
+
+      if (renderId !== null) {
+        return loadRenderModule(renderId, options.renderRegistry);
       }
 
       return null;
@@ -135,16 +195,196 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
         invalidateVirtualModule(context.server, RESOLVED_GLOBAL_CSS_MODULE_ID);
       }
 
+      if (canvasChanged) {
+        void notifyManifestUpdate(manifestStreamStore, resolvedCanvasDir);
+      }
+
       context.server.ws.send({ type: 'full-reload' });
     }
   };
+}
+
+export function createPreviewMiddleware(): Connect.NextHandleFunction {
+  return (req, res, next) => {
+    const pathname = getRequestPath(req);
+
+    if (
+      req.method !== 'GET' ||
+      pathname.startsWith('/api/') ||
+      hasFileExtension(pathname)
+    ) {
+      next();
+      return;
+    }
+
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.end(getPreviewHtml());
+  };
+}
+
+export function createSSEMiddleware(
+  canvasDirOrOptions: string | ManifestMiddlewareOptions
+): Connect.NextHandleFunction {
+  const { resolvedCanvasDir, manifestStreamStore } = resolveManifestMiddlewareOptions(canvasDirOrOptions);
+
+  return (req, res, next) => {
+    if (req.method !== 'GET' || getRequestPath(req) !== '/api/manifests/stream') {
+      next();
+      return;
+    }
+
+    void handleSSEConnection(req, res, resolvedCanvasDir, manifestStreamStore).catch(next);
+  };
+}
+
+export function createManifestsAPIMiddleware(
+  canvasDirOrOptions: string | ManifestMiddlewareOptions
+): Connect.NextHandleFunction {
+  const { resolvedCanvasDir } = resolveManifestMiddlewareOptions(canvasDirOrOptions);
+
+  return (req, res, next) => {
+    if (req.method !== 'GET' || getRequestPath(req) !== '/api/manifests') {
+      next();
+      return;
+    }
+
+    void handleManifestsAPIRequest(res, resolvedCanvasDir).catch(next);
+  };
+}
+
+async function handleSSEConnection(
+  req: IncomingMessage,
+  res: ServerResponse,
+  canvasDir: string,
+  manifestStreamStore: ManifestStreamStore
+): Promise<void> {
+  const state = getManifestStreamState(manifestStreamStore, canvasDir);
+
+  res.statusCode = 200;
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  state.connections.add(res);
+  writeSSEPayload(res, await serializeManifestPayload(canvasDir));
+
+  const cleanup = () => {
+    state.connections.delete(res);
+  };
+
+  req.on('close', cleanup);
+  res.on('close', cleanup);
+}
+
+async function handleManifestsAPIRequest(
+  res: ServerResponse,
+  canvasDir: string
+): Promise<void> {
+  const payload = await serializeManifestPayload(canvasDir);
+
+  res.statusCode = 200;
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.end(payload);
+}
+
+async function notifyManifestUpdate(
+  manifestStreamStore: ManifestStreamStore,
+  canvasDir: string
+): Promise<void> {
+  const state = manifestStreamStore.get(normalizeCanvasDir(canvasDir));
+
+  if (!state || state.connections.size === 0) {
+    return;
+  }
+
+  const payload = await serializeManifestPayload(canvasDir);
+
+  for (const connection of [...state.connections]) {
+    if (connection.writableEnded || connection.destroyed) {
+      state.connections.delete(connection);
+      continue;
+    }
+
+    try {
+      writeSSEPayload(connection, payload);
+    } catch {
+      state.connections.delete(connection);
+    }
+  }
+}
+
+async function serializeManifestPayload(canvasDir: string): Promise<string> {
+  const result = await readManifestData(canvasDir);
+  return JSON.stringify(result);
+}
+
+async function readManifestData(canvasDir: string): Promise<ParseWorkflowManifestsResult> {
+  try {
+    return await parseWorkflowManifests(canvasDir);
+  } catch (error) {
+    return {
+      workflows: [],
+      errors: [
+        {
+          file: resolve(canvasDir),
+          message: `Failed to parse manifests: ${getErrorMessage(error)}`
+        }
+      ]
+    };
+  }
+}
+
+function getManifestStreamState(
+  manifestStreamStore: ManifestStreamStore,
+  canvasDir: string
+): ManifestStreamState {
+  const normalizedCanvasDir = normalizeCanvasDir(canvasDir);
+  const existing = manifestStreamStore.get(normalizedCanvasDir);
+
+  if (existing) {
+    return existing;
+  }
+
+  const created: ManifestStreamState = {
+    connections: new Set<ServerResponse>()
+  };
+
+  manifestStreamStore.set(normalizedCanvasDir, created);
+  return created;
+}
+
+function resolveManifestMiddlewareOptions(
+  canvasDirOrOptions: string | ManifestMiddlewareOptions
+): { resolvedCanvasDir: string; manifestStreamStore: ManifestStreamStore } {
+  if (typeof canvasDirOrOptions === 'string') {
+    return {
+      resolvedCanvasDir: resolve(canvasDirOrOptions),
+      manifestStreamStore: createManifestStreamStore()
+    };
+  }
+
+  return {
+    resolvedCanvasDir: resolve(canvasDirOrOptions.canvasDir),
+    manifestStreamStore: canvasDirOrOptions.manifestStreamStore ?? createManifestStreamStore()
+  };
+}
+
+function normalizeCanvasDir(canvasDir: string): string {
+  return normalizePath(resolve(canvasDir));
+}
+
+function writeSSEPayload(res: ServerResponse, payload: string): void {
+  res.write(`data: ${payload}\n\n`);
 }
 
 async function loadManifestsModule(
   warn: (message: string) => void,
   canvasDir: string
 ): Promise<string> {
-  const result = await parseWorkflowManifests(canvasDir);
+  const result = await readManifestData(canvasDir);
 
   for (const error of result.errors) {
     warn(`[component-canvas] ${error.file}: ${error.message}`);
@@ -162,6 +402,335 @@ async function loadComponentsModule(canvasDir: string): Promise<string> {
   const adapter = new SvelteAdapter();
 
   return adapter.generateComponentModule(components);
+}
+
+function loadPreviewModule(): string {
+  return [
+    "import { mount, unmount } from 'svelte';",
+    `import { workflows, errors as manifestErrors } from ${JSON.stringify(MANIFESTS_MODULE_ID)};`,
+    `import components from ${JSON.stringify(COMPONENTS_MODULE_ID)};`,
+    `import ${JSON.stringify(GLOBAL_CSS_MODULE_ID)};`,
+    '',
+    'const appTarget = document.getElementById("app");',
+    'const workflowList = Array.isArray(workflows) ? workflows : [];',
+    'const manifestIssues = Array.isArray(manifestErrors) ? manifestErrors : [];',
+    'const componentRegistry = components ?? {};',
+    'let mountedComponent = null;',
+    'let renderVersion = 0;',
+    '',
+    'ensurePreviewStyles();',
+    'window.addEventListener("hashchange", () => {',
+    '  void renderRoute();',
+    '});',
+    'void renderRoute();',
+    '',
+    'async function renderRoute() {',
+    '  const version = ++renderVersion;',
+    '',
+    '  if (!appTarget) {',
+    '    return;',
+    '  }',
+    '',
+    '  clearMount();',
+    '',
+    '  const route = parseRoute(window.location.hash || "#/");',
+    '',
+    '  if (route.type === "screen") {',
+    '    const resolved = resolveScreen(route.workflowId, route.screenId);',
+    '',
+    '    if (!resolved.component) {',
+    '      renderMessage("Screen not found", resolved.message);',
+    '      return;',
+    '    }',
+    '',
+    '    document.title = resolved.screen.title ?? resolved.screen.id;',
+    '    mountedComponent = mount(resolved.component, {',
+    '      target: appTarget,',
+    '      props: resolved.screen.props ?? {}',
+    '    });',
+    '    return;',
+    '  }',
+    '',
+    '  if (route.type === "render") {',
+    '    await renderRegisteredPreview(route.renderId, version);',
+    '    return;',
+    '  }',
+    '',
+    '  if (manifestIssues.length > 0) {',
+    '    renderManifestIssues();',
+    '    return;',
+    '  }',
+    '',
+    '  renderMessage(',
+    '    "Preview route not found",',
+    '    "Use #/screen/<workflowId>/<screenId> or #/render/<id>."',
+    '  );',
+    '}',
+    '',
+    'function parseRoute(hash) {',
+    '  const normalizedHash = hash.replace(/^#/, "") || "/";',
+    '  const screenMatch = normalizedHash.match(/^\\/screen\\/([^/]+)\\/([^/]+)$/u);',
+    '',
+    '  if (screenMatch) {',
+    '    return {',
+    '      type: "screen",',
+    '      workflowId: decodeURIComponent(screenMatch[1]),',
+    '      screenId: decodeURIComponent(screenMatch[2])',
+    '    };',
+    '  }',
+    '',
+    '  const renderMatch = normalizedHash.match(/^\\/render\\/([^/]+)$/u);',
+    '',
+    '  if (renderMatch) {',
+    '    return {',
+    '      type: "render",',
+    '      renderId: decodeURIComponent(renderMatch[1])',
+    '    };',
+    '  }',
+    '',
+    '  return { type: "not-found" };',
+    '}',
+    '',
+    'function resolveScreen(workflowId, screenId) {',
+    '  const workflow = workflowList.find((entry) => entry.id === workflowId) ?? null;',
+    '',
+    '  if (!workflow) {',
+    '    return {',
+    '      component: null,',
+    '      screen: null,',
+    '      message: `Workflow ${workflowId} could not be found.`',
+    '    };',
+    '  }',
+    '',
+    '  const screen = workflow.screens.find((entry) => entry.id === screenId) ?? null;',
+    '',
+    '  if (!screen) {',
+    '    return {',
+    '      component: null,',
+    '      screen: null,',
+    '      message: `Screen ${screenId} could not be found in workflow ${workflowId}.`',
+    '    };',
+    '  }',
+    '',
+    '  const componentKey = `${workflow.id}/${String(screen.component)',
+    '    .replace(/^\\.\\//u, "")',
+    '    .replace(/\\\\/gu, "/")',
+    '    .replace(/\\.svelte$/u, "")}`;',
+    '  const component = componentRegistry[componentKey] ?? null;',
+    '',
+    '  if (!component) {',
+    '    return {',
+    '      component: null,',
+    '      screen,',
+    '      message: `Component ${componentKey} is not registered.`',
+    '    };',
+    '  }',
+    '',
+    '  return { component, screen, message: "" };',
+    '}',
+    '',
+    'async function renderRegisteredPreview(renderId, version) {',
+    '  try {',
+    '    const renderModule = await import(/* @vite-ignore */ resolveRenderModuleImportUrl(renderId));',
+    '',
+    '    if (version !== renderVersion || !appTarget) {',
+    '      return;',
+    '    }',
+    '',
+    '    if (typeof renderModule.render === "function") {',
+    '      const cleanup = await renderModule.render(appTarget);',
+    '',
+    '      if (version !== renderVersion) {',
+    '        if (typeof cleanup === "function") {',
+    '          cleanup();',
+    '        }',
+    '        return;',
+    '      }',
+    '',
+    '      if (typeof cleanup === "function") {',
+    '        mountedComponent = {',
+    '          $destroy: cleanup',
+    '        };',
+    '      }',
+    '',
+    '      document.title = `Render ${renderId}`;',
+    '      return;',
+    '    }',
+    '',
+    '    const PreviewComponent = renderModule.component ?? renderModule.default ?? null;',
+    '',
+    '    if (!PreviewComponent) {',
+    '      renderMessage("Render not found", `Could not resolve render ${renderId}.`);',
+    '      return;',
+    '    }',
+    '',
+    '    const props = isRecord(renderModule.props) ? renderModule.props : {};',
+    '',
+    '    mountedComponent = mount(PreviewComponent, {',
+    '      target: appTarget,',
+    '      props',
+    '    });',
+    '    document.title = `Render ${renderId}`;',
+    '  } catch (error) {',
+    '    if (version !== renderVersion) {',
+    '      return;',
+    '    }',
+    '',
+    '    renderMessage(',
+    '      "Render not found",',
+    '      `Could not resolve render ${renderId}: ${formatError(error)}`',
+    '    );',
+    '  }',
+    '}',
+    '',
+    'function clearMount() {',
+    '  if (mountedComponent) {',
+    '    try {',
+    '      unmount(mountedComponent);',
+    '    } catch {',
+    '      mountedComponent.$destroy?.();',
+    '    }',
+    '',
+    '    mountedComponent = null;',
+    '  }',
+    '',
+    '  appTarget.innerHTML = "";',
+    '}',
+    '',
+    'function renderManifestIssues() {',
+    '  const items = manifestIssues',
+    '    .map((issue) => {',
+    '      return `<li><strong>${escapeHtml(issue.file)}</strong><span>${escapeHtml(issue.message)}</span></li>`;',
+    '    })',
+    '    .join("");',
+    '',
+    '  appTarget.innerHTML = `',
+    '    <section class="component-canvas-preview__message component-canvas-preview__message--issues">',
+    '      <div class="component-canvas-preview__card">',
+    '        <h1>Manifest issues</h1>',
+    '        <ul class="component-canvas-preview__issues">${items}</ul>',
+    '      </div>',
+    '    </section>',
+    '  `;',
+    '  document.title = "Manifest issues";',
+    '}',
+    '',
+    'function renderMessage(title, message) {',
+    '  appTarget.innerHTML = `',
+    '    <section class="component-canvas-preview__message">',
+    '      <div class="component-canvas-preview__card">',
+    '        <h1>${escapeHtml(title)}</h1>',
+    '        <p>${escapeHtml(message)}</p>',
+    '      </div>',
+    '    </section>',
+    '  `;',
+    '  document.title = title;',
+    '}',
+    '',
+    'function ensurePreviewStyles() {',
+    '  if (document.getElementById("component-canvas-preview-styles")) {',
+    '    return;',
+    '  }',
+    '',
+    '  const style = document.createElement("style");',
+    '  style.id = "component-canvas-preview-styles";',
+    '  style.textContent = `',
+    '    html, body {',
+    '      min-height: 100%;',
+    '      margin: 0;',
+    '      background: #ffffff;',
+    '      color: #0f172a;',
+    '      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;',
+    '    }',
+    '',
+    '    #app {',
+    '      min-height: 100vh;',
+    '    }',
+    '',
+    '    .component-canvas-preview__message {',
+    '      box-sizing: border-box;',
+    '      display: grid;',
+    '      min-height: 100vh;',
+    '      place-items: center;',
+    '      padding: 2rem;',
+    '    }',
+    '',
+    '    .component-canvas-preview__card {',
+    '      width: min(100%, 42rem);',
+    '      border: 1px solid rgba(148, 163, 184, 0.32);',
+    '      border-radius: 24px;',
+    '      background: rgba(255, 255, 255, 0.92);',
+    '      box-shadow: 0 20px 50px rgba(15, 23, 42, 0.12);',
+    '      padding: 1.5rem;',
+    '    }',
+    '',
+    '    .component-canvas-preview__card h1,',
+    '    .component-canvas-preview__card p {',
+    '      margin: 0;',
+    '    }',
+    '',
+    '    .component-canvas-preview__card p {',
+    '      margin-top: 0.75rem;',
+    '      color: #475569;',
+    '      line-height: 1.6;',
+    '    }',
+    '',
+    '    .component-canvas-preview__issues {',
+    '      list-style: none;',
+    '      display: grid;',
+    '      gap: 0.75rem;',
+    '      margin: 1rem 0 0;',
+    '      padding: 0;',
+    '    }',
+    '',
+    '    .component-canvas-preview__issues li {',
+    '      display: grid;',
+    '      gap: 0.2rem;',
+    '      padding: 0.9rem 1rem;',
+    '      border-radius: 16px;',
+    '      background: #f8fafc;',
+    '    }',
+    '',
+    '    .component-canvas-preview__issues strong {',
+    '      font-size: 0.95rem;',
+    '      word-break: break-all;',
+    '    }',
+    '  `;',
+    '',
+    '  document.head.append(style);',
+    '}',
+    '',
+    'function escapeHtml(value) {',
+    '  return String(value)',
+    '    .replace(/&/gu, "&amp;")',
+    '    .replace(/</gu, "&lt;")',
+    '    .replace(/>/gu, "&gt;")',
+    '    .replace(/"/gu, "&quot;")',
+    '    .replace(/\'/gu, "&#39;");',
+    '}',
+    '',
+    'function isRecord(value) {',
+    '  return typeof value === "object" && value !== null && !Array.isArray(value);',
+    '}',
+    '',
+    'function resolveRenderModuleImportUrl(renderId) {',
+    '  return `/preview/@id/__x00__component-canvas:render-${encodeURIComponent(renderId)}`;',
+    '}',
+    '',
+    'function formatError(error) {',
+    '  return error instanceof Error ? error.message : String(error);',
+    '}'
+  ].join('\n');
+}
+
+function loadRenderModule(renderId: string, renderRegistry: RenderRegistry | undefined): string {
+  const registeredModule = renderRegistry?.get(renderId);
+
+  if (registeredModule) {
+    return registeredModule;
+  }
+
+  return `throw new Error(${JSON.stringify(`Render ${renderId} is not registered.`)});`;
 }
 
 export function isPurityViolation(
@@ -322,14 +891,41 @@ function resolvePurityPath(path: string, aliases: Alias[], baseDir: string): str
     }
 
     const suffix = path.slice(matchedAlias.find.length).replace(/^\/+/, '');
-    return normalizePath(suffix.length > 0 ? resolve(matchedAlias.replacement, suffix) : resolve(matchedAlias.replacement));
+    return normalizeComparablePath(
+      suffix.length > 0 ? resolve(matchedAlias.replacement, suffix) : resolve(matchedAlias.replacement)
+    );
   }
 
   if (isAbsolute(path) || path.startsWith('.')) {
-    return normalizePath(resolve(baseDir, path));
+    return normalizeComparablePath(resolve(baseDir, path));
   }
 
   return undefined;
+}
+
+function resolveAliasedPath(source: string, aliases: Alias[]): string | null {
+  const matchedAlias = aliases.find(
+    (alias): alias is Alias & { find: string; replacement: string } =>
+      typeof alias.find === 'string' &&
+      typeof alias.replacement === 'string' &&
+      matchesSpecifierPrefix(source, alias.find)
+  );
+
+  if (!matchedAlias) {
+    return null;
+  }
+
+  const suffix = source.slice(matchedAlias.find.length).replace(/^\/+/, '');
+
+  if (isAbsolute(matchedAlias.replacement)) {
+    return normalizePath(
+      suffix.length > 0 ? resolve(matchedAlias.replacement, suffix) : resolve(matchedAlias.replacement)
+    );
+  }
+
+  return suffix.length > 0
+    ? `${matchedAlias.replacement.replace(/\/+$/u, '')}/${suffix}`
+    : matchedAlias.replacement;
 }
 
 function resolvePathOption(value: string, baseDir: string): string {
@@ -342,6 +938,10 @@ function resolvePathOption(value: string, baseDir: string): string {
 
 function uniqueStrings(values: Array<string | undefined>): string[] {
   return [...new Set(values.filter((value): value is string => value !== undefined))];
+}
+
+function toAllowPath(value: string | undefined): string | undefined {
+  return value && isAbsolute(value) ? value : undefined;
 }
 
 function matchesSpecifierPrefix(source: string, prefix: string): boolean {
@@ -362,16 +962,16 @@ function resolveSpecifierPath(source: string, importer: string): string | undefi
   const sourceWithoutQuery = source.split('?')[0];
 
   if (sourceWithoutQuery.startsWith('/@fs/')) {
-    return normalizePath(sourceWithoutQuery.slice('/@fs/'.length));
+    return normalizeComparablePath(sourceWithoutQuery.slice('/@fs/'.length));
   }
 
   if (isAbsolute(sourceWithoutQuery)) {
-    return normalizePath(resolve(sourceWithoutQuery));
+    return normalizeComparablePath(resolve(sourceWithoutQuery));
   }
 
   if (sourceWithoutQuery.startsWith('.')) {
     const importerWithoutQuery = importer.split('?')[0];
-    return normalizePath(resolve(dirname(importerWithoutQuery), sourceWithoutQuery));
+    return normalizeComparablePath(resolve(dirname(importerWithoutQuery), sourceWithoutQuery));
   }
 
   return undefined;
@@ -395,10 +995,14 @@ function findMatchedPurityComponentPathIndex(
 }
 
 function isPathInside(path: string, directory: string): boolean {
-  const normalizedPath = normalizePath(resolve(path));
-  const normalizedDirectory = normalizePath(resolve(directory));
+  const normalizedPath = normalizeComparablePath(path);
+  const normalizedDirectory = normalizeComparablePath(directory);
 
   return normalizedPath === normalizedDirectory || normalizedPath.startsWith(`${normalizedDirectory}/`);
+}
+
+function normalizeComparablePath(path: string): string {
+  return normalizePath(resolve(path)).replace(/^\/private(?=\/var\/)/u, '');
 }
 
 function getDefaultExport(module: unknown): unknown {
@@ -409,3 +1013,10 @@ function getDefaultExport(module: unknown): unknown {
   return undefined;
 }
 
+function hasFileExtension(pathname: string): boolean {
+  return extname(pathname) !== '';
+}
+
+function getPreviewHtml(): string {
+  return '<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Preview</title></head><body><div id="app"></div><script type="module" src="/@id/__x00__component-canvas:preview"></script></body></html>';
+}

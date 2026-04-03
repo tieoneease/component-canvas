@@ -10,7 +10,7 @@ const fixturesDir = resolve(process.cwd(), 'tests/fixtures');
 
 describe('startServer', () => {
   it(
-    'starts the canvas app with Vite and serves the app shell',
+    'starts the shell server and serves preview HTML through the mounted preview route',
     async () => {
       const projectRoot = resolve(fixturesDir, 'valid-workflow');
       const server = await startServer({
@@ -20,12 +20,21 @@ describe('startServer', () => {
 
       try {
         expect(server.url).toMatch(/^http:\/\//u);
+        expect(server.previewUrl).toMatch(/^http:\/\//u);
 
-        const response = await fetch(server.url);
-        const html = await response.text();
+        const [shellResponse, previewResponse] = await Promise.all([
+          fetch(server.url),
+          fetch(server.previewUrl)
+        ]);
+        const [shellHtml, previewHtml] = await Promise.all([
+          shellResponse.text(),
+          previewResponse.text()
+        ]);
 
-        expect(response.ok).toBe(true);
-        expect(html).toContain('id="app"');
+        expect(shellResponse.ok).toBe(true);
+        expect(shellHtml).toContain('id="shell-app"');
+        expect(previewResponse.ok).toBe(true);
+        expect(previewHtml).toContain('id="app"');
       } finally {
         await expect(server.close()).resolves.toBeUndefined();
       }
@@ -34,7 +43,7 @@ describe('startServer', () => {
   );
 
   it(
-    'uses the built-in standalone Tailwind config when no project config is provided',
+    'can start from a temporary standalone project with no local vite.config.ts',
     async () => {
       const projectRoot = await mkdtemp(join(tmpdir(), 'component-canvas-standalone-'));
       const canvasDir = resolve(projectRoot, '.canvas');
@@ -45,7 +54,7 @@ describe('startServer', () => {
         await mkdir(workflowDir, { recursive: true });
         await writeFile(
           resolve(workflowDir, 'Card.svelte'),
-          '<div class="bg-sky-500 text-white px-4 py-2 rounded-lg">Hello Tailwind</div>\n',
+          '<div class="standalone-card">Hello standalone preview</div>\n',
           'utf8'
         );
         await writeFile(
@@ -70,11 +79,19 @@ describe('startServer', () => {
 
         server = await startServer({ canvasDir, projectRoot });
 
-        const pageResponse = await fetch(server.url);
-        const html = await pageResponse.text();
+        const [shellResponse, previewResponse] = await Promise.all([
+          fetch(server.url),
+          fetch(server.previewUrl)
+        ]);
+        const [shellHtml, previewHtml] = await Promise.all([
+          shellResponse.text(),
+          previewResponse.text()
+        ]);
 
-        expect(pageResponse.ok).toBe(true);
-        expect(html).toContain('id="app"');
+        expect(shellResponse.ok).toBe(true);
+        expect(shellHtml).toContain('id="shell-app"');
+        expect(previewResponse.ok).toBe(true);
+        expect(previewHtml).toContain('id="app"');
       } finally {
         if (server) {
           await expect(server.close()).resolves.toBeUndefined();

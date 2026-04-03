@@ -12,11 +12,12 @@ import {
 import { createBrowserPool, type BrowserPool } from './screenshot.ts';
 import { startServer } from './server.ts';
 import {
-  escapeAttributeValue,
+  ensureTrailingSlash,
   getErrorMessage,
   importFreshModule,
   isPlainObject,
   pathExists,
+  resolvePreviewUrl,
   sanitizePathSegment
 } from './utils.ts';
 
@@ -46,6 +47,7 @@ export interface RenderCheckResult {
 
 interface ServerLease {
   url: string;
+  previewUrl?: string;
   close: () => Promise<void>;
 }
 
@@ -107,13 +109,12 @@ export async function renderCheck(options: RenderCheckOptions): Promise<RenderCh
             `${String(screenshotIndex).padStart(4, '0')}-${sanitizePathSegment(workflow.id)}-${sanitizePathSegment(screen.id)}.png`
           );
           screenshotIndex += 1;
-          const selector = `[data-isolated-screen="${escapeAttributeValue(screen.id)}"]`;
-          const url = `${ensureTrailingSlash(serverLease.url)}#/screen/${encodeURIComponent(workflow.id)}/${encodeURIComponent(screen.id)}`;
+          const baseUrl = ensureTrailingSlash(serverLease.previewUrl ?? serverLease.url);
+          const url = `${baseUrl}#/screen/${encodeURIComponent(workflow.id)}/${encodeURIComponent(screen.id)}`;
 
           await browserPool.capture({
             url,
-            selector,
-            waitForSelector: selector,
+            waitForSelector: 'html',
             outputPath
           });
 
@@ -173,6 +174,7 @@ function selectWorkflows(workflows: WorkflowManifest[], workflowId?: string): Wo
 function createExternalServerLease(serverUrl: string): ServerLease {
   return {
     url: serverUrl,
+    previewUrl: resolvePreviewUrl(serverUrl),
     close: async () => {}
   };
 }
@@ -254,7 +256,4 @@ function summarizeResults(screens: ScreenCheckResult[]): RenderCheckResult['summ
   );
 }
 
-function ensureTrailingSlash(url: string): string {
-  return url.endsWith('/') ? url : `${url}/`;
-}
 

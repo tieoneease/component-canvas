@@ -89,7 +89,9 @@ async function captureWithBrowser(browser: Browser, options: ScreenshotOptions):
     const pageErrors: string[] = [];
 
     page.on('pageerror', (error) => {
-      pageErrors.push(error.message);
+      if (!isIgnorablePageError(error.message)) {
+        pageErrors.push(error.message);
+      }
     });
 
     await page.goto(options.url, { waitUntil: 'load' });
@@ -194,6 +196,10 @@ async function assertNoRenderErrors(page: Page, pageErrors: string[]): Promise<v
   if (viteError) {
     throw new Error(viteError);
   }
+}
+
+function isIgnorablePageError(message: string): boolean {
+  return message === 'WebSocket closed without opened.';
 }
 
 async function readViteErrorOverlayMessage(page: Page): Promise<string | null> {

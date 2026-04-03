@@ -8,14 +8,8 @@ import { isPlainObject, pathExists } from './utils.ts';
 export interface CanvasConfig {
   /** Optional path to the project's .canvas directory. */
   canvasDir?: string;
-  /** Path to project's src/lib (for $lib alias). */
-  lib?: string;
-  /** Path to global CSS file to inject. */
-  globalCss?: string;
   /** Import path → mock module path mappings. */
   mocks?: Record<string, string>;
-  /** Additional Vite resolve aliases. */
-  aliases?: Record<string, string>;
   /** Purity enforcement rules for visual components. */
   purity?: PurityConfig;
 }
@@ -28,6 +22,9 @@ const CONFIG_ENV: ConfigEnv = {
   isSsrBuild: false,
   isPreview: false
 };
+
+const SUPPORTED_CONFIG_FIELDS = ['canvasDir', 'mocks', 'purity'] as const;
+const REMOVED_CONFIG_FIELDS = new Set(['aliases', 'globalCss', 'lib']);
 
 export async function loadConfig(cwd: string): Promise<CanvasConfig | null> {
   const resolvedCwd = resolve(cwd);
@@ -53,18 +50,35 @@ function validateConfig(config: unknown, configPath: string): asserts config is 
     throw new Error(`${configPath} must default export an object.`);
   }
 
+  validateKnownFields(config, configPath);
   validateOptionalString(config, 'canvasDir', configPath);
-  validateOptionalString(config, 'lib', configPath);
-
-  validateOptionalString(config, 'globalCss', configPath);
   validateOptionalStringRecord(config, 'mocks', configPath);
-  validateOptionalStringRecord(config, 'aliases', configPath);
   validateOptionalPurityConfig(config, configPath);
+}
+
+function validateKnownFields(config: Record<string, unknown>, configPath: string): void {
+  const supportedFields = new Set<string>(SUPPORTED_CONFIG_FIELDS);
+
+  for (const key of Object.keys(config)) {
+    if (supportedFields.has(key)) {
+      continue;
+    }
+
+    if (REMOVED_CONFIG_FIELDS.has(key)) {
+      throw new Error(
+        `${configPath} field "${key}" has been removed. canvas.config.ts now only supports "canvasDir", "mocks", and "purity"; project aliases and global CSS should be configured in vite.config.ts.`
+      );
+    }
+
+    throw new Error(
+      `${configPath} field "${key}" is not supported. canvas.config.ts only supports "canvasDir", "mocks", and "purity".`
+    );
+  }
 }
 
 function validateOptionalString(
   config: Record<string, unknown>,
-  key: 'canvasDir' | 'lib' | 'globalCss',
+  key: 'canvasDir',
   configPath: string
 ): void {
   const value = config[key];
@@ -76,7 +90,7 @@ function validateOptionalString(
 
 function validateOptionalStringRecord(
   config: Record<string, unknown>,
-  key: 'mocks' | 'aliases',
+  key: 'mocks',
   configPath: string
 ): void {
   const value = config[key];
@@ -131,4 +145,3 @@ function validateRequiredStringArray(
     }
   }
 }
-

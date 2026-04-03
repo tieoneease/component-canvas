@@ -1,119 +1,512 @@
+import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { dirname, resolve } from 'node:path';
-import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { createServer, type ViteDevServer } from 'vite';
+import type { Connect, InlineConfig, UserConfig, ViteDevServer } from 'vite';
 
 import { SvelteAdapter } from './adapter.ts';
-import { loadConfig, type CanvasConfig } from './config.ts';
-import canvasVitePlugin from './vite-plugin.ts';
+import { loadConfig } from './config.ts';
+import {
+  attachRenderRegistry,
+  createRenderAPIMiddleware,
+  createRenderRegistry
+} from './render.ts';
+import { composePreviewConfig, loadProjectViteConfig, resolvePackageEntry } from './project.ts';
+import { resolveFromProject } from './resolve-plugin.ts';
+import { getErrorMessage, getRequestPath, getRequestPathFromUrl, pathExists } from './utils.ts';
+import canvasVitePlugin, {
+  createManifestStreamStore,
+  createManifestsAPIMiddleware,
+  createPreviewMiddleware,
+  createSSEMiddleware
+} from './vite-plugin.ts';
 
 export interface ServerOptions {
   canvasDir: string;
   port?: number;
   projectRoot?: string;
-  aliases?: Record<string, string>;
   mocks?: Record<string, string>;
-  globalCss?: string;
   logLevel?: 'info' | 'warn' | 'error' | 'silent';
 }
 
 export interface StartedServer {
   url: string;
+  previewUrl: string;
+  previewServer: ViteDevServer;
   close: () => Promise<void>;
 }
 
+type Middleware = Connect.NextHandleFunction;
+type CreateViteServer = typeof import('vite')['createServer'];
+
+const DEFAULT_HOST = '127.0.0.1';
+const DEFAULT_PORT = 5173;
+const MAX_PORT_ATTEMPTS = 20;
+const VITE_REQUEST_PREFIXES = ['/@fs', '/@id', '/@vite', '/__', '/node_modules', '/src', '/virtual:'];
+
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const appDir = resolve(packageRoot, 'app');
-const appConfigFile = resolve(appDir, 'vite.config.js');
+const packageResolutionFallbacks = [packageRoot];
+const shellDistDir = resolve(packageRoot, 'shell', 'dist');
 
 export async function startServer(options: ServerOptions): Promise<StartedServer> {
   const resolvedCanvasDir = resolve(options.canvasDir);
   const resolvedProjectRoot = resolve(options.projectRoot ?? dirname(resolvedCanvasDir));
+  const shellIndexPath = resolve(shellDistDir, 'index.html');
+
+  if (!(await pathExists(shellIndexPath))) {
+    throw new Error(
+      `Built shell assets were not found at "${shellIndexPath}". Run "bun run build:shell" first.`
+    );
+  }
+
   const adapter = new SvelteAdapter();
-  const projectConfig = await loadConfig(resolvedProjectRoot);
-  const resolvedAliases = mergeAliases(projectConfig, options.aliases);
-  const resolvedMocks = mergeStringMaps(projectConfig?.mocks, options.mocks);
-  const configuredGlobalCss = options.globalCss ?? projectConfig?.globalCss;
-  const resolvedGlobalCss = resolveAllowPath(configuredGlobalCss, resolvedProjectRoot);
+  const canvasConfig = await loadConfig(resolvedProjectRoot);
+  const resolvedMocks = mergeStringMaps(canvasConfig?.mocks, options.mocks);
+  const renderRegistry = createRenderRegistry();
+  const manifestStreamStore = createManifestStreamStore();
+  const basePreviewMiddleware = createPreviewMiddleware();
+  const sseMiddleware = createSSEMiddleware({
+    canvasDir: resolvedCanvasDir,
+    manifestStreamStore
+  });
+  const manifestsApiMiddleware = createManifestsAPIMiddleware({
+    canvasDir: resolvedCanvasDir,
+    manifestStreamStore
+  });
+  const shellMiddleware = await createShellMiddleware();
+  const projectViteConfig = await loadProjectViteConfig(
+    resolvedProjectRoot,
+    packageResolutionFallbacks
+  );
+  const projectAliases = extractProjectAliases(projectViteConfig);
 
-  // Write @source directive for Tailwind v4 to scan the canvas directory
-  const canvasSourcesCss = resolve(appDir, 'src', 'canvas-sources.css');
-  writeFileSync(canvasSourcesCss, `@source "${resolvedCanvasDir.replace(/\\/g, '/')}/**/*.svelte";\n`);
+  const previewConfig = await composePreviewConfig(
+    resolvedProjectRoot,
+    [
+      resolveFromProject(
+        resolvedProjectRoot,
+        ['svelte', '@sveltejs/vite-plugin-svelte', 'vite'],
+        packageResolutionFallbacks
+      ),
+      canvasVitePlugin({
+        canvasDir: resolvedCanvasDir,
+        projectRoot: resolvedProjectRoot,
+        aliases: projectAliases,
+        mocks: resolvedMocks,
+        purity: canvasConfig?.purity ?? adapter.defaultPurityRules(),
+        renderRegistry,
+        manifestStreamStore
+      })
+    ],
+    packageResolutionFallbacks
+  );
 
-  let server: ViteDevServer | undefined;
+  let previewServer: ViteDevServer | undefined;
+  let httpServer: Server | undefined;
   let closed = false;
 
   try {
-    const canvasPluginOptions = {
-      canvasDir: resolvedCanvasDir,
-      projectRoot: resolvedProjectRoot,
-      aliases: resolvedAliases,
-      mocks: resolvedMocks,
-      globalCss: configuredGlobalCss,
-      purity: projectConfig?.purity ?? adapter.defaultPurityRules()
-    };
-
-    server = await createServer({
-      root: appDir,
-      configFile: appConfigFile,
-      logLevel: options.logLevel,
-      plugins: [canvasVitePlugin(canvasPluginOptions)],
-      server: {
-        host: '127.0.0.1',
-        port: options.port,
-        strictPort: options.port !== undefined,
-        fs: {
-          allow: uniquePaths([appDir, resolvedProjectRoot, resolvedCanvasDir, resolvedGlobalCss])
-        }
-      }
+    previewServer = await createPreviewServer(
+      resolvedProjectRoot,
+      previewConfig,
+      options.logLevel,
+      packageResolutionFallbacks
+    );
+    attachRenderRegistry(previewServer, renderRegistry);
+    const renderApiMiddleware = createRenderAPIMiddleware(previewServer);
+    const previewMiddleware = createMountedPreviewMiddleware(basePreviewMiddleware, previewServer);
+    httpServer = createHttpServer((req, res) => {
+      handleRequest({
+        req,
+        res,
+        previewServer: previewServer!,
+        previewMiddleware,
+        sseMiddleware,
+        manifestsApiMiddleware,
+        renderApiMiddleware,
+        shellMiddleware
+      });
     });
 
-    await server.listen();
-    const startedServer = server;
+    await listenHttpServer(httpServer, options.port);
+
+    const startedHttpServer = httpServer;
+    const startedPreviewServer = previewServer;
+    const url = resolveServerUrl(startedHttpServer);
 
     return {
-      url: resolveServerUrl(startedServer),
+      url,
+      previewUrl: new URL('preview/', url).toString(),
+      previewServer: startedPreviewServer,
       close: async () => {
         if (closed) return;
         closed = true;
-        await startedServer.close();
+        await Promise.allSettled([
+          safeCloseHttpServer(startedHttpServer),
+          startedPreviewServer.close()
+        ]);
       }
     };
   } catch (error) {
-    if (server) await safeClose(server);
+    await Promise.allSettled([
+      httpServer ? safeCloseHttpServer(httpServer) : Promise.resolve(),
+      previewServer ? previewServer.close() : Promise.resolve()
+    ]);
     throw error;
   }
 }
 
-function resolveServerUrl(server: ViteDevServer): string {
-  const resolvedUrl = server.resolvedUrls?.local[0] ?? server.resolvedUrls?.network[0];
-  if (resolvedUrl) return resolvedUrl;
+async function createPreviewServer(
+  projectRoot: string,
+  previewConfig: InlineConfig,
+  logLevel: ServerOptions['logLevel'],
+  fallbackSearchPaths: string[] = []
+): Promise<ViteDevServer> {
+  const viteEntry = await resolvePackageEntry(projectRoot, 'vite', fallbackSearchPaths);
+  const viteModule = (await import(viteEntry.url)) as {
+    createServer?: CreateViteServer;
+  };
 
-  const address = server.httpServer?.address();
+  if (typeof viteModule.createServer !== 'function') {
+    throw new Error(`Resolved Vite module "${viteEntry.url}" does not export createServer().`);
+  }
+
+  return viteModule.createServer({
+    ...previewConfig,
+    appType: 'custom',
+    base: '/preview/',
+    root: resolvePreviewRoot(previewConfig.root, projectRoot),
+    logLevel,
+    server: {
+      ...previewConfig.server,
+      middlewareMode: true
+    }
+  });
+}
+
+function createMountedPreviewMiddleware(
+  previewMiddleware: Middleware,
+  previewServer: ViteDevServer
+): Middleware {
+  return (req, res, next) => {
+    const originalEnd = res.end.bind(res);
+    let previewHtml: string | undefined;
+
+    res.end = ((chunk) => {
+      if (typeof chunk === 'string' || chunk instanceof Uint8Array) {
+        previewHtml = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+      }
+
+      return res;
+    }) as typeof res.end;
+
+    previewMiddleware(req, res, (error?: unknown) => {
+      res.end = originalEnd;
+      next(error);
+    });
+
+    res.end = originalEnd;
+
+    if (previewHtml === undefined) {
+      return;
+    }
+
+    const sourceHtml = previewHtml.replace(
+      '<script type="module" src="/@id/__x00__component-canvas:preview"></script>',
+      '<script type="module">import "virtual:canvas-preview";</script>'
+    );
+
+    void previewServer
+      .transformIndexHtml('/preview/', sourceHtml)
+      .then((transformedHtml) => {
+        if (isResponseHandled(res)) {
+          return;
+        }
+
+        originalEnd(transformedHtml as never);
+      })
+      .catch((error) => {
+        sendError(res, error, previewServer);
+      });
+  };
+}
+
+async function createShellMiddleware(): Promise<Middleware> {
+  const sirvModule = await import('sirv');
+  const sirv = sirvModule.default;
+
+  return sirv(shellDistDir, {
+    dev: true,
+    etag: true,
+    single: 'index.html'
+  }) as Middleware;
+}
+
+function handleRequest(options: {
+  req: IncomingMessage;
+  res: ServerResponse;
+  previewServer: ViteDevServer;
+  previewMiddleware: Middleware;
+  sseMiddleware: Middleware;
+  manifestsApiMiddleware: Middleware;
+  renderApiMiddleware: Middleware;
+  shellMiddleware: Middleware;
+}): void {
+  const {
+    req,
+    res,
+    previewServer,
+    previewMiddleware,
+    sseMiddleware,
+    manifestsApiMiddleware,
+    renderApiMiddleware,
+    shellMiddleware
+  } = options;
+  const pathname = getRequestPath(req);
+
+  if (
+    routePreviewApiRequest(pathname, '/preview/api/manifests/stream', req, res, sseMiddleware, previewServer) ||
+    routePreviewApiRequest(pathname, '/preview/api/manifests', req, res, manifestsApiMiddleware, previewServer) ||
+    routePreviewApiRequest(pathname, '/preview/api/renders', req, res, renderApiMiddleware, previewServer)
+  ) {
+    return;
+  }
+
+  if (pathname === '/preview' || pathname.startsWith('/preview/')) {
+    const strippedUrl = stripPreviewPrefix(req.url);
+    const strippedPathname = getRequestPathFromUrl(strippedUrl);
+
+    if (isViteRequestPath(strippedPathname)) {
+      invokeMiddleware(previewServer.middlewares, req, res, previewServer, () => {
+        if (!isResponseHandled(res)) {
+          sendNotFound(res);
+        }
+      });
+      return;
+    }
+
+    req.url = strippedUrl;
+    invokeMiddleware(previewServer.middlewares, req, res, previewServer, () => {
+      if (isResponseHandled(res)) {
+        return;
+      }
+
+      invokeMiddleware(previewMiddleware, req, res, previewServer, () => {
+        if (!isResponseHandled(res)) {
+          sendNotFound(res);
+        }
+      });
+    });
+    return;
+  }
+
+  if (isViteRequestPath(pathname)) {
+    invokeMiddleware(previewServer.middlewares, req, res, previewServer, () => {
+      if (!isResponseHandled(res)) {
+        sendNotFound(res);
+      }
+    });
+    return;
+  }
+
+  invokeMiddleware(shellMiddleware, req, res, undefined, () => {
+    if (!isResponseHandled(res)) {
+      sendNotFound(res);
+    }
+  });
+}
+
+function invokeMiddleware(
+  middleware: Middleware,
+  req: IncomingMessage,
+  res: ServerResponse,
+  previewServer: ViteDevServer | undefined,
+  onNext: () => void
+): void {
+  try {
+    middleware(req, res, (error?: unknown) => {
+      if (error) {
+        sendError(res, error, previewServer);
+        return;
+      }
+
+      onNext();
+    });
+  } catch (error) {
+    sendError(res, error, previewServer);
+  }
+}
+
+function routePreviewApiRequest(
+  pathname: string,
+  expectedPath: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+  middleware: Middleware,
+  previewServer: ViteDevServer
+): boolean {
+  if (pathname !== expectedPath) {
+    return false;
+  }
+
+  const originalUrl = req.url;
+  const restoreUrl = () => {
+    req.url = originalUrl;
+    res.off('finish', restoreUrl);
+    res.off('close', restoreUrl);
+  };
+
+  req.url = stripPreviewPrefix(req.url);
+  res.on('finish', restoreUrl);
+  res.on('close', restoreUrl);
+  invokeMiddleware(middleware, req, res, previewServer, () => {
+    restoreUrl();
+
+    if (!isResponseHandled(res)) {
+      sendNotFound(res);
+    }
+  });
+
+  return true;
+}
+
+function stripPreviewPrefix(url: string | undefined): string {
+  const parsedUrl = new URL(url ?? '/preview/', 'http://component-canvas.local');
+  const strippedPath = parsedUrl.pathname.replace(/^\/preview(?=\/|$)/u, '') || '/';
+  return `${strippedPath}${parsedUrl.search}`;
+}
+
+function isViteRequestPath(pathname: string): boolean {
+  return VITE_REQUEST_PREFIXES.some((prefix) => {
+    if (prefix === '/__' || prefix === '/virtual:') {
+      return pathname.startsWith(prefix);
+    }
+
+    return pathname === prefix || pathname.startsWith(`${prefix}/`);
+  });
+}
+
+function isResponseHandled(res: ServerResponse): boolean {
+  return res.headersSent || res.writableEnded || res.destroyed;
+}
+
+function sendNotFound(res: ServerResponse): void {
+  if (isResponseHandled(res)) {
+    return;
+  }
+
+  res.statusCode = 404;
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.end('Not Found');
+}
+
+function sendError(res: ServerResponse, error: unknown, previewServer?: ViteDevServer): void {
+  if (isResponseHandled(res)) {
+    return;
+  }
+
+  if (error instanceof Error && previewServer) {
+    previewServer.ssrFixStacktrace(error);
+  }
+
+  res.statusCode = 500;
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.end(getErrorMessage(error));
+}
+
+async function listenHttpServer(server: Server, requestedPort?: number): Promise<void> {
+  if (requestedPort !== undefined) {
+    await listenOnce(server, requestedPort);
+    return;
+  }
+
+  for (let offset = 0; offset < MAX_PORT_ATTEMPTS; offset += 1) {
+    try {
+      await listenOnce(server, DEFAULT_PORT + offset);
+      return;
+    } catch (error) {
+      if (!isAddressInUseError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error(
+    `Unable to find an open port after trying ${MAX_PORT_ATTEMPTS} ports starting at ${DEFAULT_PORT}.`
+  );
+}
+
+function listenOnce(server: Server, port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const handleError = (error: unknown) => {
+      cleanup();
+      reject(error);
+    };
+    const handleListening = () => {
+      cleanup();
+      resolve();
+    };
+    const cleanup = () => {
+      server.off('error', handleError);
+      server.off('listening', handleListening);
+    };
+
+    server.once('error', handleError);
+    server.once('listening', handleListening);
+    server.listen({ host: DEFAULT_HOST, port });
+  });
+}
+
+function isAddressInUseError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && 'code' in error && error.code === 'EADDRINUSE';
+}
+
+function resolveServerUrl(server: Server): string {
+  const address = server.address();
+
   if (!address || typeof address === 'string') {
-    throw new Error('Vite dev server did not expose a listening URL.');
+    throw new Error('Component canvas server did not expose a listening URL.');
   }
 
   const host = address.family === 'IPv6' ? `[${address.address}]` : address.address;
   return `http://${host}:${address.port}/`;
 }
 
-function resolveAllowPath(value: string | undefined, baseDir: string): string | undefined {
-  if (!value) return undefined;
-  if (value.startsWith('.') || value.startsWith('/')) return resolve(baseDir, value);
-  return undefined;
+function resolvePreviewRoot(root: string | undefined, projectRoot: string): string {
+  if (!root) {
+    return projectRoot;
+  }
+
+  return resolve(projectRoot, root);
 }
 
-function mergeAliases(
-  projectConfig: CanvasConfig | null,
-  explicitAliases: Record<string, string> | undefined
-): Record<string, string> | undefined {
-  const aliases = {
-    ...(projectConfig?.aliases ?? {}),
-    ...(projectConfig?.lib ? { '$lib': projectConfig.lib } : {}),
-    ...(explicitAliases ?? {})
-  };
+function extractProjectAliases(projectConfig: UserConfig | null): Record<string, string> | undefined {
+  const aliasConfig = projectConfig?.resolve?.alias;
+
+  if (!aliasConfig) {
+    return undefined;
+  }
+
+  if (!Array.isArray(aliasConfig)) {
+    const aliases = Object.fromEntries(
+      Object.entries(aliasConfig).filter(
+        (entry): entry is [string, string] => typeof entry[0] === 'string' && typeof entry[1] === 'string'
+      )
+    );
+
+    return Object.keys(aliases).length > 0 ? aliases : undefined;
+  }
+
+  const aliases = Object.fromEntries(
+    aliasConfig.flatMap((entry) => {
+      if (typeof entry.find === 'string' && typeof entry.replacement === 'string') {
+        return [[entry.find, entry.replacement] as const];
+      }
+
+      return [];
+    })
+  );
+
   return Object.keys(aliases).length > 0 ? aliases : undefined;
 }
 
@@ -125,10 +518,15 @@ function mergeStringMaps(
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
-function uniquePaths(paths: Array<string | undefined>): string[] {
-  return [...new Set(paths.filter((path): path is string => path !== undefined))];
-}
+function safeCloseHttpServer(server: Server): Promise<void> {
+  return new Promise((resolve) => {
+    if (!server.listening) {
+      resolve();
+      return;
+    }
 
-async function safeClose(server: ViteDevServer): Promise<void> {
-  try { await server.close(); } catch {}
+    server.close(() => {
+      resolve();
+    });
+  });
 }

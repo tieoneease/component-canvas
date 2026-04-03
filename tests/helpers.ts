@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 export function extractFirstJsonObject(source: string): string | null {
   let start = -1;
@@ -54,6 +55,37 @@ export function extractFirstJsonObject(source: string): string | null {
   return null;
 }
 
+const repoSveltePluginEntryUrl = pathToFileURL(
+  resolve(process.cwd(), 'node_modules', '@sveltejs', 'vite-plugin-svelte', 'src', 'index.js')
+).href;
+
+export function createViteConfigSource(options: { includeLibAlias?: boolean } = {}): string {
+  const includeLibAlias = options.includeLibAlias ?? false;
+  const lines = ["import { defineConfig } from 'vite';"];
+
+  if (includeLibAlias) {
+    lines.unshift("import { fileURLToPath } from 'node:url';");
+    lines.push('', "const libDir = fileURLToPath(new URL('./src/lib', import.meta.url));");
+  }
+
+  lines.push(
+    '',
+    'export default defineConfig(async () => {',
+    `  const { svelte } = await import(${JSON.stringify(repoSveltePluginEntryUrl)});`,
+    '',
+    '  return {',
+    '    plugins: [svelte()],'
+  );
+
+  if (includeLibAlias) {
+    lines.push('    resolve: {', '      alias: {', '        $lib: libDir', '      }', '    }');
+  }
+
+  lines.push('  };', '});', '');
+
+  return lines.join('\n');
+}
+
 export async function createRenderCheckFixture(): Promise<string> {
   const projectRoot = await mkdtemp(join(tmpdir(), 'component-canvas-render-check-'));
 
@@ -61,7 +93,7 @@ export async function createRenderCheckFixture(): Promise<string> {
   await mkdir(resolve(projectRoot, '.canvas', 'workflows', 'prototype'), { recursive: true });
   await mkdir(resolve(projectRoot, 'src', 'lib', 'components'), { recursive: true });
 
-  await writeFile(resolve(projectRoot, 'canvas.config.ts'), 'export default { lib: "./src/lib" };\n', 'utf8');
+  await writeFile(resolve(projectRoot, 'vite.config.ts'), createViteConfigSource({ includeLibAlias: true }), 'utf8');
 
   await writeFile(
     resolve(projectRoot, 'src', 'lib', 'components', 'GreetingCard.svelte'),

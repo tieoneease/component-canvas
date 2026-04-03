@@ -1,25 +1,31 @@
 #!/usr/bin/env node
 
+import { spawn } from 'node:child_process';
 import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { Command, InvalidArgumentError } from 'commander';
 
 import { CANVAS_CONFIG_FILE_NAME, loadConfig, type CanvasConfig } from '../lib/config.ts';
+import { extractComponentAPI, type ComponentAPI, type PropInfo } from '../lib/explore.ts';
 import { initProject, type InitProjectResult } from '../lib/init.ts';
 import {
   parseWorkflowManifests,
   type ManifestError,
   type WorkflowManifest
 } from '../lib/manifest.ts';
+import { registerRender, type RenderRegistration } from '../lib/render.ts';
 import { renderCheck, type RenderCheckResult } from '../lib/render-check.ts';
 import { createBrowserPool } from '../lib/screenshot.ts';
 import { startServer } from '../lib/server.ts';
 import {
+  ensureTrailingSlash,
   escapeAttributeValue,
   getErrorMessage,
   isPlainObject,
   pathExists,
+  resolvePreviewUrl,
   sanitizePathSegment
 } from '../lib/utils.ts';
 
@@ -33,6 +39,8 @@ interface DevCommandOptions extends JsonFlagOptions {
 
 interface ListCommandOptions extends JsonFlagOptions {}
 
+interface ExploreCommandOptions extends JsonFlagOptions {}
+
 interface ScreenshotCommandOptions extends JsonFlagOptions {
   screen?: string;
   all?: boolean;
@@ -44,6 +52,11 @@ interface RenderCheckCommandOptions extends JsonFlagOptions {
 }
 
 interface InitCommandOptions extends JsonFlagOptions {}
+
+interface RenderCommandOptions extends JsonFlagOptions {
+  props?: string;
+  screenshot?: boolean;
+}
 
 interface ProjectContext {
   cwd: string;
@@ -74,14 +87,27 @@ interface ScreenshotOutput {
   height: number;
 }
 
+interface RenderOutput {
+  id: string;
+  url: string;
+  screenshot?: {
+    path: string;
+    width: number;
+    height: number;
+    bytes: number;
+  };
+}
+
 interface RunningServerState {
   url: string;
+  previewUrl?: string;
   port: number;
   pid: number;
 }
 
 interface ServerLease {
   url: string;
+  previewUrl?: string;
   close: () => Promise<void>;
 }
 
@@ -97,6 +123,7 @@ class CliError extends Error {
 
 const program = new Command();
 const DEV_SERVER_STATE_FILE = '.component-canvas-dev.json';
+const CLI_ENTRY_PATH = fileURLToPath(import.meta.url);
 
 program
   .name('component-canvas')
@@ -118,10 +145,11 @@ program
       });
 
       try {
-        await writeRunningServerState(context, server.url);
+        await writeRunningServerState(context, server.url, server.previewUrl);
 
         const payload = {
           url: server.url,
+          previewUrl: server.previewUrl,
           port: getPortFromUrl(server.url)
         };
 
@@ -162,6 +190,24 @@ program
 
       process.stdout.write(formatWorkflowTable(summaries));
       process.stdout.write('\n');
+    });
+  });
+
+program
+  .command('explore')
+  .description('Extract props, events, and snippets from a Svelte component.')
+  .argument('<path>', 'Path to a .svelte component file')
+  .option('--json', 'Output machine-readable JSON')
+  .action(async (componentPath: string, options: ExploreCommandOptions, command: Command) => {
+    await runCommand(command, async () => {
+      const api = await extractComponentAPI(resolve(process.cwd(), componentPath));
+
+      if (options.json) {
+        writeJson(api);
+        return;
+      }
+
+      process.stdout.write(`${formatComponentAPI(api, componentPath)}\n`);
     });
   });
 
@@ -294,7 +340,7 @@ program
 
 program
   .command('init')
-  .description('Initialize component-canvas config and sample workflow files.')
+  .description('Initialize the component-canvas scaffold and sample workflow files.')
   .option('--json', 'Output machine-readable JSON')
   .action(async (options: InitCommandOptions, command: Command) => {
     await runCommand(command, async () => {
@@ -310,6 +356,43 @@ program
       }
 
       process.stdout.write(`${formatInitSummary(result)}\n`);
+    });
+  });
+
+program
+  .command('render')
+  .description('Render an arbitrary component state through the preview server.')
+  .argument('<path>', 'Path to a .svelte component')
+  .option('--props <json>', 'JSON object of props to pass to the component')
+  .option('--screenshot', 'Capture a PNG of the rendered component')
+  .option('--json', 'Output machine-readable JSON')
+  .action(async (componentPath: string, options: RenderCommandOptions, command: Command) => {
+    await runCommand(command, async () => {
+      const context = await resolveProjectContext(process.cwd(), { requireCanvas: false });
+      const resolvedComponentPath = resolve(context.cwd, componentPath);
+      const props = parseRenderPropsOption(options.props);
+
+      if (!(await pathExists(resolvedComponentPath))) {
+        throw new CliError(`Component file was not found: ${displayPath(resolvedComponentPath)}`);
+      }
+
+      const output = await renderComponentPreview({
+        context,
+        componentPath: resolvedComponentPath,
+        props,
+        captureScreenshot: Boolean(options.screenshot)
+      });
+
+      if (options.json) {
+        writeJson(output);
+        return;
+      }
+
+      process.stdout.write(`Render URL: ${output.url}\n`);
+
+      if (output.screenshot) {
+        process.stdout.write(`Screenshot: ${displayPath(output.screenshot.path)}\n`);
+      }
     });
   });
 
@@ -434,6 +517,7 @@ async function acquireServer(context: ProjectContext): Promise<ServerLease> {
   if (runningServer && (await isServerReachable(runningServer.url))) {
     return {
       url: runningServer.url,
+      previewUrl: runningServer.previewUrl ?? resolvePreviewUrl(runningServer.url),
       close: async () => {}
     };
   }
@@ -449,14 +533,186 @@ async function acquireServer(context: ProjectContext): Promise<ServerLease> {
 
   return {
     url: server.url,
+    previewUrl: server.previewUrl,
     close: server.close
   };
 }
 
-async function writeRunningServerState(context: ProjectContext, url: string): Promise<void> {
+async function renderComponentPreview(options: {
+  context: ProjectContext;
+  componentPath: string;
+  props: Record<string, unknown>;
+  captureScreenshot: boolean;
+}): Promise<RenderOutput> {
+  const { context, componentPath, props, captureScreenshot } = options;
+  const runningServer = await readRunningServerState(context);
+
+  if (runningServer && (await isServerReachable(runningServer.url))) {
+    const registration = await requestRenderRegistration(
+      runningServer.previewUrl ?? resolvePreviewUrl(runningServer.url),
+      componentPath,
+      props
+    );
+
+    return await finalizeRenderOutput(context, runningServer.url, registration, captureScreenshot);
+  }
+
+  if (runningServer) {
+    await removeRunningServerState(context);
+  }
+
+  if (captureScreenshot) {
+    const server = await startServer({
+      ...toServerOptions(context),
+      logLevel: 'silent'
+    });
+
+    try {
+      const registration = registerRender(server.previewServer, componentPath, props);
+      return await finalizeRenderOutput(context, server.url, registration, true);
+    } finally {
+      await server.close();
+    }
+  }
+
+  if (!(await directoryExists(context.canvasDir))) {
+    throw new CliError(
+      'No running component-canvas dev server was found. Start "component-canvas dev" first for a shareable render URL, or pass --screenshot for a one-off render.'
+    );
+  }
+
+  const startedServer = await startDetachedDevServer(context);
+  const registration = await requestRenderRegistration(
+    startedServer.previewUrl ?? resolvePreviewUrl(startedServer.url),
+    componentPath,
+    props
+  );
+
+  return await finalizeRenderOutput(context, startedServer.url, registration, false);
+}
+
+async function finalizeRenderOutput(
+  context: ProjectContext,
+  serverUrl: string,
+  registration: RenderRegistration,
+  captureScreenshot: boolean
+): Promise<RenderOutput> {
+  const url = new URL(registration.url, serverUrl).toString();
+
+  if (!captureScreenshot) {
+    return {
+      id: registration.id,
+      url
+    };
+  }
+
+  const browserPool = await createBrowserPool();
+
+  try {
+    const screenshot = await browserPool.capture({
+      url,
+      outputPath: resolveRenderScreenshotOutputPath(context, registration.id)
+    });
+
+    return {
+      id: registration.id,
+      url,
+      screenshot: {
+        path: screenshot.path,
+        width: screenshot.width,
+        height: screenshot.height,
+        bytes: screenshot.bytes
+      }
+    };
+  } finally {
+    await browserPool.close();
+  }
+}
+
+async function requestRenderRegistration(
+  previewUrl: string,
+  componentPath: string,
+  props: Record<string, unknown>
+): Promise<RenderRegistration> {
+  const endpoint = new URL('api/renders', ensureTrailingSlash(previewUrl));
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ componentPath, props }),
+    signal: AbortSignal.timeout(10_000)
+  });
+
+  if (!response.ok) {
+    throw new CliError(`Render registration failed with ${response.status} ${response.statusText}.`, {
+      url: endpoint.toString(),
+      body: await response.text()
+    });
+  }
+
+  const payload = (await response.json()) as unknown;
+
+  if (
+    !isPlainObject(payload) ||
+    typeof payload.id !== 'string' ||
+    typeof payload.url !== 'string'
+  ) {
+    throw new CliError('Render registration returned an invalid response payload.', payload);
+  }
+
+  return {
+    id: payload.id,
+    url: payload.url
+  };
+}
+
+async function startDetachedDevServer(context: ProjectContext): Promise<RunningServerState> {
+  const child = spawn(process.execPath, [...process.execArgv, CLI_ENTRY_PATH, 'dev', '--json'], {
+    cwd: context.projectRoot,
+    detached: true,
+    stdio: 'ignore'
+  });
+
+  child.unref();
+
+  const startedServer = await waitForRunningServerState(context, 30_000);
+
+  if (!startedServer) {
+    throw new CliError('Timed out waiting for the component-canvas dev server to start.');
+  }
+
+  return startedServer;
+}
+
+async function waitForRunningServerState(
+  context: ProjectContext,
+  timeoutMs: number
+): Promise<RunningServerState | null> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const runningServer = await readRunningServerState(context);
+
+    if (runningServer && (await isServerReachable(runningServer.url))) {
+      return runningServer;
+    }
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+  }
+
+  return null;
+}
+
+async function writeRunningServerState(
+  context: ProjectContext,
+  url: string,
+  previewUrl?: string
+): Promise<void> {
   const statePath = resolve(context.canvasDir, DEV_SERVER_STATE_FILE);
   const payload: RunningServerState = {
     url,
+    previewUrl,
     port: getPortFromUrl(url),
     pid: process.pid
   };
@@ -486,6 +742,7 @@ async function readRunningServerState(context: ProjectContext): Promise<RunningS
 
     return {
       url: value.url,
+      previewUrl: typeof value.previewUrl === 'string' ? value.previewUrl : undefined,
       port: value.port,
       pid: value.pid
     };
@@ -539,6 +796,37 @@ function formatWorkflowTable(workflows: WorkflowSummary[]): string {
   );
 }
 
+function formatComponentAPI(api: ComponentAPI, filePath: string): string {
+  const lines = [`Component API: ${displayPath(resolve(process.cwd(), filePath))}`];
+  const totalEntries = api.props.length + api.events.length + api.snippets.length;
+
+  if (totalEntries === 0) {
+    lines.push('', 'No props, events, or snippets found.');
+    return lines.join('\n');
+  }
+
+  appendComponentAPISection(lines, 'Props', api.props);
+  appendComponentAPISection(lines, 'Events', api.events);
+  appendComponentAPISection(lines, 'Snippets', api.snippets);
+
+  return lines.join('\n');
+}
+
+function appendComponentAPISection(lines: string[], title: string, entries: PropInfo[]): void {
+  if (entries.length === 0) {
+    return;
+  }
+
+  lines.push('');
+  lines.push(title);
+  lines.push(
+    formatTable(
+      ['NAME', 'TYPE', 'REQUIRED', 'DEFAULT'],
+      entries.map((entry) => [entry.name, entry.type, entry.required ? 'yes' : 'no', entry.default ?? ''])
+    )
+  );
+}
+
 function formatRenderCheckTable(result: RenderCheckResult): string {
   return formatTable(
     ['WORKFLOW', 'SCREEN', 'STATUS'],
@@ -579,12 +867,17 @@ function formatInitSummary(result: InitProjectResult): string {
     lines.push('', 'Nothing new was created. Existing files were left unchanged.');
   }
 
-  lines.push('', 'Detected project features:');
-  lines.push(`- src/lib: ${result.detected.lib ? 'yes' : 'no'}`);
-  lines.push(`- svelte.config.js: ${result.svelteConfig ? 'yes' : 'no'}`);
+  lines.push('', "Your project's vite.config.ts will be loaded automatically for previews.");
+  lines.push('See .canvas/AGENTS.md for architecture notes and explore/render usage.');
+
+  if (result.svelteConfig) {
+    lines.push('Detected svelte.config.* in this project.');
+  }
 
   if (result.config === null) {
-    lines.push('', 'No canvas.config.ts was created because no project-mode features were detected.');
+    lines.push('', 'canvas.config.ts is optional and was not created. Add it later only if you need mocks or purity rules.');
+  } else if (!result.created.includes(CANVAS_CONFIG_FILE_NAME)) {
+    lines.push('', 'Existing canvas.config.ts was left unchanged.');
   }
 
   return lines.join('\n');
@@ -620,6 +913,34 @@ function resolveScreenshotOutputRoot(context: ProjectContext, output?: string): 
   }
 
   return resolve(context.canvasDir, 'screenshots');
+}
+
+function resolveRenderScreenshotOutputPath(context: ProjectContext, renderId: string): string {
+  const screenshotRoot = context.canvasDir
+    ? resolve(context.canvasDir, 'renders')
+    : resolve(context.projectRoot, '.component-canvas-renders');
+
+  return resolve(screenshotRoot, `${sanitizePathSegment(renderId)}.png`);
+}
+
+function parseRenderPropsOption(value: string | undefined): Record<string, unknown> {
+  if (!value) {
+    return {};
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch (error) {
+    throw new CliError(`Failed to parse --props JSON: ${getErrorMessage(error)}`);
+  }
+
+  if (!isPlainObject(parsed)) {
+    throw new CliError('The --props value must be a JSON object.');
+  }
+
+  return parsed;
 }
 
 function parsePortOption(value: string): number {
