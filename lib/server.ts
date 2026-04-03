@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import { createServer, type ViteDevServer } from 'vite';
 
+import { SvelteAdapter } from './adapter.ts';
 import { loadConfig, type CanvasConfig } from './config.ts';
 import canvasVitePlugin from './vite-plugin.ts';
 
@@ -28,6 +29,7 @@ const appConfigFile = resolve(appDir, 'vite.config.js');
 export async function startServer(options: ServerOptions): Promise<StartedServer> {
   const resolvedCanvasDir = resolve(options.canvasDir);
   const resolvedProjectRoot = resolve(options.projectRoot ?? dirname(resolvedCanvasDir));
+  const adapter = new SvelteAdapter();
   const projectConfig = await loadConfig(resolvedProjectRoot);
   const resolvedAliases = mergeAliases(projectConfig, options.aliases);
   const resolvedMocks = mergeStringMaps(projectConfig?.mocks, options.mocks);
@@ -42,18 +44,19 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
   let closed = false;
 
   try {
+    const canvasPluginOptions = {
+      canvasDir: resolvedCanvasDir,
+      projectRoot: resolvedProjectRoot,
+      aliases: resolvedAliases,
+      mocks: resolvedMocks,
+      globalCss: configuredGlobalCss,
+      purity: projectConfig?.purity ?? adapter.defaultPurityRules()
+    };
+
     server = await createServer({
       root: appDir,
       configFile: appConfigFile,
-      plugins: [
-        canvasVitePlugin({
-          canvasDir: resolvedCanvasDir,
-          projectRoot: resolvedProjectRoot,
-          aliases: resolvedAliases,
-          mocks: resolvedMocks,
-          globalCss: configuredGlobalCss
-        })
-      ],
+      plugins: [canvasVitePlugin(canvasPluginOptions)],
       server: {
         host: '127.0.0.1',
         port: options.port,
