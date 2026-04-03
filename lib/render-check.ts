@@ -1,8 +1,6 @@
-import { constants } from 'node:fs';
-import { access, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
 
 import { SvelteAdapter } from './adapter.ts';
 import {
@@ -13,6 +11,14 @@ import {
 } from './manifest.ts';
 import { createBrowserPool, type BrowserPool } from './screenshot.ts';
 import { startServer } from './server.ts';
+import {
+  escapeAttributeValue,
+  getErrorMessage,
+  importFreshModule,
+  isPlainObject,
+  pathExists,
+  sanitizePathSegment
+} from './utils.ts';
 
 export interface RenderCheckOptions {
   canvasDir: string;
@@ -216,15 +222,6 @@ async function resolveWorkflowDirectories(canvasDir: string): Promise<Map<string
   return directories;
 }
 
-async function importFreshModule(modulePath: string): Promise<unknown> {
-  const moduleUrl = pathToFileURL(modulePath);
-  const metadata = await stat(modulePath);
-
-  moduleUrl.searchParams.set('t', String(metadata.mtimeMs));
-
-  return import(moduleUrl.href);
-}
-
 function getWorkflowIdFromModule(moduleValue: unknown): string | undefined {
   if (!isPlainObject(moduleValue) || !('default' in moduleValue) || !isPlainObject(moduleValue.default)) {
     return undefined;
@@ -261,33 +258,3 @@ function ensureTrailingSlash(url: string): string {
   return url.endsWith('/') ? url : `${url}/`;
 }
 
-function sanitizePathSegment(value: string): string {
-  const sanitized = value.trim().replace(/[^a-zA-Z0-9._-]+/gu, '-').replace(/^-+|-+$/gu, '');
-
-  return sanitized.length > 0 ? sanitized : 'screen';
-}
-
-function escapeAttributeValue(value: string): string {
-  return value.replace(/\\/gu, '\\\\').replace(/"/gu, '\\"');
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await access(path, constants.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return String(error);
-}

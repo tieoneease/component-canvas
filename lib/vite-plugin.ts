@@ -1,11 +1,17 @@
-import { constants } from 'node:fs';
-import { access, readdir } from 'node:fs/promises';
+import { readdir } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import { normalizePath, type Alias, type Plugin, type UserConfig, type ViteDevServer } from 'vite';
 
 import { SvelteAdapter, type ComponentEntry, type PurityConfig } from './adapter.ts';
 import { parseWorkflowManifests } from './manifest.ts';
+import {
+  importFreshModule,
+  isNonEmptyString,
+  isPlainObject,
+  pathExists,
+  toFsImportPath
+} from './utils.ts';
 
 export interface CanvasVitePluginOptions {
   canvasDir: string;
@@ -33,7 +39,7 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
   const resolvedGlobalCss = options.globalCss ? resolvePathOption(options.globalCss, baseDir) : undefined;
   const purityAliases = [...resolvedMocks, ...resolvedAliases];
   const resolvedPurityComponentPaths = options.purity
-    ? resolvePurityPaths(options.purity.componentPaths, purityAliases, baseDir)
+    ? resolveIndexedPurityPaths(options.purity.componentPaths, purityAliases, baseDir)
     : [];
   const resolvedPurityForbiddenImportPaths = options.purity
     ? resolvePurityPaths(options.purity.forbiddenImports, purityAliases, baseDir)
@@ -89,7 +95,9 @@ export default function canvasVitePlugin(options: CanvasVitePluginOptions): Plug
           resolvedPurityForbiddenImportPaths
         )
       ) {
-        this.error(formatPurityError(source, importer, options.purity));
+        this.error(
+          formatPurityError(source, importer, options.purity, resolvedPurityComponentPaths)
+        );
       }
 
       return null;
@@ -160,10 +168,10 @@ export function isPurityViolation(
   source: string,
   importer: string,
   rules: PurityConfig,
-  resolvedComponentPaths: string[],
+  resolvedComponentPaths: Array<string | undefined>,
   resolvedForbiddenImportPaths: string[] = []
 ): boolean {
-  if (!resolvedComponentPaths.some((componentPath) => isPathInside(importer, componentPath))) {
+  if (findMatchedPurityComponentPathIndex(importer, resolvedComponentPaths) < 0) {
     return false;
   }
 
@@ -175,8 +183,17 @@ export function isPurityViolation(
   );
 }
 
-export function formatPurityError(source: string, importer: string, rules: PurityConfig): string {
-  const matchedComponentPath = rules.componentPaths[0] ?? '<unknown>';
+export function formatPurityError(
+  source: string,
+  importer: string,
+  rules: PurityConfig,
+  resolvedComponentPaths: Array<string | undefined> = []
+): string {
+  const matchedComponentPathIndex = findMatchedPurityComponentPathIndex(importer, resolvedComponentPaths);
+  const matchedComponentPath =
+    (matchedComponentPathIndex >= 0 ? rules.componentPaths[matchedComponentPathIndex] : undefined) ??
+    rules.componentPaths[0] ??
+    '<unknown>';
   const matchedForbiddenImport =
     rules.forbiddenImports.find((forbiddenImport) => matchesSpecifierPrefix(source, forbiddenImport)) ??
     rules.forbiddenImports[0] ??
@@ -279,12 +296,16 @@ function createAliasEntries(entries: Record<string, string> | undefined, baseDir
   }));
 }
 
+function resolveIndexedPurityPaths(
+  paths: string[],
+  aliases: Alias[],
+  baseDir: string
+): Array<string | undefined> {
+  return paths.map((path) => resolvePurityPath(path, aliases, baseDir));
+}
+
 function resolvePurityPaths(paths: string[], aliases: Alias[], baseDir: string): string[] {
-  return uniqueStrings(
-    paths
-      .map((path) => resolvePurityPath(path, aliases, baseDir))
-      .filter((path): path is string => path !== undefined)
-  );
+  return uniqueStrings(paths.map((path) => resolvePurityPath(path, aliases, baseDir)));
 }
 
 function resolvePurityPath(path: string, aliases: Alias[], baseDir: string): string | undefined {
@@ -364,8 +385,13 @@ function invalidateVirtualModule(server: ViteDevServer, moduleId: string): void 
   }
 }
 
-function toFsImportPath(path: string): string {
-  return `/@fs/${normalizePath(resolve(path))}`;
+function findMatchedPurityComponentPathIndex(
+  importer: string,
+  resolvedComponentPaths: Array<string | undefined>
+): number {
+  return resolvedComponentPaths.findIndex(
+    (componentPath) => componentPath !== undefined && isPathInside(importer, componentPath)
+  );
 }
 
 function isPathInside(path: string, directory: string): boolean {
@@ -373,17 +399,6 @@ function isPathInside(path: string, directory: string): boolean {
   const normalizedDirectory = normalizePath(resolve(directory));
 
   return normalizedPath === normalizedDirectory || normalizedPath.startsWith(`${normalizedDirectory}/`);
-}
-
-async function importFreshModule(modulePath: string): Promise<unknown> {
-  const { pathToFileURL } = await import('node:url');
-  const { stat } = await import('node:fs/promises');
-  const moduleUrl = pathToFileURL(modulePath);
-  const stats = await stat(modulePath);
-
-  moduleUrl.searchParams.set('t', String(stats.mtimeMs));
-
-  return import(moduleUrl.href);
 }
 
 function getDefaultExport(module: unknown): unknown {
@@ -394,19 +409,3 @@ function getDefaultExport(module: unknown): unknown {
   return undefined;
 }
 
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await access(path, constants.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
-}

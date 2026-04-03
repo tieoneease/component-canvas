@@ -18,9 +18,9 @@ const purityRules: PurityConfig = {
   componentPaths: ['$lib/components/'],
   forbiddenImports: ['$lib/stores/', '$app/navigation']
 };
+const componentPath = `${resolve(fixturesDir, 'valid-workflow/src/lib/components')}/`;
 
 describe('isPurityViolation', () => {
-  const componentPath = `${resolve(fixturesDir, 'valid-workflow/src/lib/components')}/`;
 
   it('returns true when a component imports from a forbidden path', () => {
     const importer = resolve(fixturesDir, 'valid-workflow/src/lib/components/Chat.svelte');
@@ -79,13 +79,29 @@ describe('isPurityViolation', () => {
 describe('formatPurityError', () => {
   it('includes the importer, source, matched rule, and fix guidance', () => {
     const importer = resolve(fixturesDir, 'valid-workflow/src/lib/components/Chat.svelte');
-    const message = formatPurityError('$lib/stores/conversation', importer, purityRules);
+    const message = formatPurityError('$lib/stores/conversation', importer, purityRules, [componentPath]);
 
     expect(message).toContain(importer);
     expect(message).toContain("'$lib/stores/conversation'");
     expect(message).toContain("'$lib/components/'");
     expect(message).toContain("'$lib/stores/'");
     expect(message).toContain('Fix: lift this import to the page shell that renders this component.');
+  });
+
+  it('uses the matched component rule instead of always using the first configured rule', () => {
+    const importer = resolve(fixturesDir, 'valid-workflow/src/lib/components/Chat.svelte');
+    const message = formatPurityError(
+      '$lib/stores/conversation',
+      importer,
+      {
+        componentPaths: ['$lib/unused/', '$lib/components/'],
+        forbiddenImports: purityRules.forbiddenImports
+      },
+      [undefined, componentPath]
+    );
+
+    expect(message).toContain("'$lib/components/'");
+    expect(message).not.toContain("'$lib/unused/'");
   });
 });
 

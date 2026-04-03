@@ -1,10 +1,9 @@
-import { constants } from 'node:fs';
-import { access } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 import { loadConfigFromFile, type ConfigEnv } from 'vite';
 
 import type { PurityConfig } from './adapter.ts';
+import { isPlainObject, pathExists } from './utils.ts';
 
 export interface CanvasConfig {
   /** Optional path to the project's .canvas directory. */
@@ -34,7 +33,7 @@ export async function loadConfig(cwd: string): Promise<CanvasConfig | null> {
   const resolvedCwd = resolve(cwd);
   const configPath = join(resolvedCwd, CANVAS_CONFIG_FILE_NAME);
 
-  if (!(await fileExists(configPath))) {
+  if (!(await pathExists(configPath))) {
     return null;
   }
 
@@ -133,15 +132,3 @@ function validateRequiredStringArray(
   }
 }
 
-async function fileExists(path: string): Promise<boolean> {
-  try {
-    await access(path, constants.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}

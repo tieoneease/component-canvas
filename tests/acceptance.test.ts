@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { renderCheck } from '../lib/render-check.ts';
+import { extractFirstJsonObject } from './helpers.ts';
 
 const execFile = promisify(execFileCallback);
 const cliPath = resolve(process.cwd(), 'bin/cli.ts');
@@ -833,58 +834,6 @@ function sortScreenshots(
 
     return left.screen.localeCompare(right.screen);
   });
-}
-
-function extractFirstJsonObject(source: string): string | null {
-  let start = -1;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-
-  for (let index = 0; index < source.length; index += 1) {
-    const character = source[index];
-
-    if (start === -1) {
-      if (character === '{') {
-        start = index;
-        depth = 1;
-      }
-
-      continue;
-    }
-
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (character === '\\') {
-        escaped = true;
-      } else if (character === '"') {
-        inString = false;
-      }
-
-      continue;
-    }
-
-    if (character === '"') {
-      inString = true;
-      continue;
-    }
-
-    if (character === '{') {
-      depth += 1;
-      continue;
-    }
-
-    if (character === '}') {
-      depth -= 1;
-
-      if (depth === 0) {
-        return source.slice(start, index + 1);
-      }
-    }
-  }
-
-  return null;
 }
 
 async function readJsonFile<T>(path: string): Promise<T> {

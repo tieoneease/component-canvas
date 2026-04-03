@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
-import { constants } from 'node:fs';
-import { access, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 
 import { Command, InvalidArgumentError } from 'commander';
@@ -16,6 +15,13 @@ import {
 import { renderCheck, type RenderCheckResult } from '../lib/render-check.ts';
 import { createBrowserPool } from '../lib/screenshot.ts';
 import { startServer } from '../lib/server.ts';
+import {
+  escapeAttributeValue,
+  getErrorMessage,
+  isPlainObject,
+  pathExists,
+  sanitizePathSegment
+} from '../lib/utils.ts';
 
 interface JsonFlagOptions {
   json?: boolean;
@@ -350,7 +356,7 @@ async function resolveProjectContext(
   while (true) {
     const configPath = join(currentDir, CANVAS_CONFIG_FILE_NAME);
     const defaultCanvasDir = join(currentDir, '.canvas');
-    const hasConfig = await fileExists(configPath);
+    const hasConfig = await pathExists(configPath);
     const hasCanvas = await directoryExists(defaultCanvasDir);
 
     if (hasConfig || hasCanvas) {
@@ -461,7 +467,7 @@ async function writeRunningServerState(context: ProjectContext, url: string): Pr
 async function readRunningServerState(context: ProjectContext): Promise<RunningServerState | null> {
   const statePath = resolve(context.canvasDir, DEV_SERVER_STATE_FILE);
 
-  if (!(await fileExists(statePath))) {
+  if (!(await pathExists(statePath))) {
     return null;
   }
 
@@ -616,16 +622,6 @@ function resolveScreenshotOutputRoot(context: ProjectContext, output?: string): 
   return resolve(context.canvasDir, 'screenshots');
 }
 
-function sanitizePathSegment(value: string): string {
-  const sanitized = value.trim().replace(/[^a-zA-Z0-9._-]+/gu, '-').replace(/^-+|-+$/gu, '');
-
-  return sanitized.length > 0 ? sanitized : 'screen';
-}
-
-function escapeAttributeValue(value: string): string {
-  return value.replace(/\\/gu, '\\\\').replace(/"/gu, '\\"');
-}
-
 function parsePortOption(value: string): number {
   const port = Number.parseInt(value, 10);
 
@@ -661,15 +657,6 @@ async function waitForShutdownSignal(): Promise<'SIGINT' | 'SIGTERM'> {
   });
 }
 
-async function fileExists(path: string): Promise<boolean> {
-  try {
-    await access(path, constants.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function directoryExists(path: string): Promise<boolean> {
   try {
     const metadata = await stat(path);
@@ -695,16 +682,4 @@ function displayPath(path: string): string {
 
 function isManifestError(value: unknown): value is ManifestError {
   return isPlainObject(value) && typeof value.file === 'string' && typeof value.message === 'string';
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return String(error);
 }

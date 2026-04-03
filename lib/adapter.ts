@@ -1,7 +1,7 @@
-import { resolve } from 'node:path';
-
 import { svelte } from '@sveltejs/vite-plugin-svelte';
-import { normalizePath, type Plugin } from 'vite';
+import type { Plugin } from 'vite';
+
+import { toFsImportPath } from './utils.ts';
 
 export interface ComponentEntry {
   key: string;
@@ -64,6 +64,3 @@ export class SvelteAdapter implements FrameworkAdapter {
   }
 }
 
-function toFsImportPath(path: string): string {
-  return `/@fs/${normalizePath(resolve(path))}`;
-}
