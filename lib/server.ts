@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { createServer, type ViteDevServer } from 'vite';
 
 import { SvelteAdapter } from './adapter.ts';
-import { loadConfig, type CanvasConfig } from './config.ts';
+import { loadConfig } from './config.ts';
 import canvasVitePlugin from './vite-plugin.ts';
 
 export interface ServerOptions {
@@ -32,9 +32,9 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
   const resolvedProjectRoot = resolve(options.projectRoot ?? dirname(resolvedCanvasDir));
   const adapter = new SvelteAdapter();
   const projectConfig = await loadConfig(resolvedProjectRoot);
-  const resolvedAliases = mergeAliases(projectConfig, options.aliases);
+  const resolvedAliases = options.aliases;
   const resolvedMocks = mergeStringMaps(projectConfig?.mocks, options.mocks);
-  const configuredGlobalCss = options.globalCss ?? projectConfig?.globalCss;
+  const configuredGlobalCss = options.globalCss;
   const resolvedGlobalCss = resolveAllowPath(configuredGlobalCss, resolvedProjectRoot);
 
   // Write @source directive for Tailwind v4 to scan the canvas directory
@@ -103,18 +103,6 @@ function resolveAllowPath(value: string | undefined, baseDir: string): string | 
   if (!value) return undefined;
   if (value.startsWith('.') || value.startsWith('/')) return resolve(baseDir, value);
   return undefined;
-}
-
-function mergeAliases(
-  projectConfig: CanvasConfig | null,
-  explicitAliases: Record<string, string> | undefined
-): Record<string, string> | undefined {
-  const aliases = {
-    ...(projectConfig?.aliases ?? {}),
-    ...(projectConfig?.lib ? { '$lib': projectConfig.lib } : {}),
-    ...(explicitAliases ?? {})
-  };
-  return Object.keys(aliases).length > 0 ? aliases : undefined;
 }
 
 function mergeStringMaps(

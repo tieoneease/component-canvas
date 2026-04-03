@@ -1,6 +1,3 @@
-import { svelte } from '@sveltejs/vite-plugin-svelte';
-import type { Plugin } from 'vite';
-
 import { toFsImportPath } from './utils.ts';
 
 export interface ComponentEntry {
@@ -15,7 +12,6 @@ export interface PurityConfig {
 
 export interface FrameworkAdapter {
   fileExtensions: string[];
-  vitePlugins(): Plugin[];
   generateComponentModule(components: ComponentEntry[]): string;
   defaultPurityRules(): PurityConfig;
   isPrototypeScreen(screenSource: string): boolean;
@@ -28,10 +24,6 @@ const SVELTEKIT_DEFAULT_PURITY: PurityConfig = {
 
 export class SvelteAdapter implements FrameworkAdapter {
   fileExtensions = ['.svelte'];
-
-  vitePlugins(): Plugin[] {
-    return svelte();
-  }
 
   generateComponentModule(components: ComponentEntry[]): string {
     const importLines = components.map((entry, index) => {
@@ -63,4 +55,3 @@ export class SvelteAdapter implements FrameworkAdapter {
     return !importLines.some((line) => line.includes('$lib/'));
   }
 }
-

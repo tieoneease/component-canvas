@@ -59,10 +59,6 @@ async function detectProjectStructure(projectRoot: string): Promise<ProjectStruc
   const hasSvelteConfig = await fileExists(resolve(projectRoot, 'svelte.config.js'));
   const config: CanvasConfig = {};
 
-  if (hasLib) {
-    config.lib = './src/lib';
-  }
-
   return {
     detected: { lib: hasLib },
     config,

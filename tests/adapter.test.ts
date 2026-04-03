@@ -62,13 +62,4 @@ describe('SvelteAdapter', () => {
     expect(moduleSource).toContain('export default components;');
   });
 
-  it('returns Vite plugins for Svelte', () => {
-    const plugins = adapter.vitePlugins();
-
-    expect(Array.isArray(plugins)).toBe(true);
-    expect(plugins.length).toBeGreaterThan(0);
-    expect(plugins[0]).toMatchObject({
-      name: expect.any(String)
-    });
-  });
 });
