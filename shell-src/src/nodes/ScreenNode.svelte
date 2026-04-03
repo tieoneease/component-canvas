@@ -39,6 +39,7 @@
       src={data?.previewSrc}
       loading="lazy"
       tabindex="-1"
+      data-screen-frame={data?.screenId ?? undefined}
       style={iframeStyle}
     ></iframe>
   </div>

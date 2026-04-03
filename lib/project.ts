@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { mergeConfig, type InlineConfig, type Plugin, type UserConfig } from 'vite';
+import { mergeConfig, type InlineConfig, type Plugin, type PluginOption, type UserConfig } from 'vite';
 
 import { isPlainObject, pathExists } from './utils.ts';
 
@@ -24,10 +24,11 @@ const PROJECT_CONFIG_ENV = {
 
 export async function resolvePackageEntry(
   projectRoot: string,
-  packageName: string
+  packageName: string,
+  fallbackSearchPaths: string[] = []
 ): Promise<{ dir: string; url: string; version: string }> {
   const resolvedProjectRoot = resolve(projectRoot);
-  const packageDir = await findPackageDir(resolvedProjectRoot, packageName);
+  const packageDir = await findPackageDir(resolvedProjectRoot, packageName, fallbackSearchPaths);
   const packageJson = await readPackageJson(packageDir);
   const version = getStringField(packageJson.version);
   const entry = resolvePackageJsonEntry(packageJson);
@@ -47,9 +48,12 @@ export async function resolvePackageEntry(
   };
 }
 
-export async function loadProjectViteConfig(projectRoot: string): Promise<UserConfig | null> {
+export async function loadProjectViteConfig(
+  projectRoot: string,
+  fallbackSearchPaths: string[] = []
+): Promise<UserConfig | null> {
   const resolvedProjectRoot = resolve(projectRoot);
-  const viteEntry = await resolvePackageEntry(resolvedProjectRoot, 'vite');
+  const viteEntry = await resolvePackageEntry(resolvedProjectRoot, 'vite', fallbackSearchPaths);
   const viteModule = (await import(viteEntry.url)) as {
     loadConfigFromFile?: LoadConfigFromFile;
   };
@@ -76,10 +80,11 @@ export async function loadProjectViteConfig(projectRoot: string): Promise<UserCo
 
 export async function composePreviewConfig(
   projectRoot: string,
-  canvasPlugins: Plugin[]
+  canvasPlugins: Plugin[],
+  fallbackSearchPaths: string[] = []
 ): Promise<InlineConfig> {
   const resolvedProjectRoot = resolve(projectRoot);
-  const projectConfig = await loadProjectViteConfig(resolvedProjectRoot);
+  const projectConfig = await loadProjectViteConfig(resolvedProjectRoot, fallbackSearchPaths);
   const canvasConfig: InlineConfig = {
     configFile: false,
     plugins: [...canvasPlugins],
@@ -89,13 +94,56 @@ export async function composePreviewConfig(
       }
     }
   };
+  const mergedConfig = mergeConfig(projectConfig ?? {}, canvasConfig) as InlineConfig;
+  const projectPlugins = normalizePluginOptions(projectConfig?.plugins);
 
-  return mergeConfig(projectConfig ?? {}, canvasConfig) as InlineConfig;
+  if (canvasPlugins.length > 0 || projectPlugins.length > 0) {
+    mergedConfig.plugins = [...canvasPlugins, ...projectPlugins];
+  }
+
+  return mergedConfig;
 }
 
-async function findPackageDir(projectRoot: string, packageName: string): Promise<string> {
+function normalizePluginOptions(plugins: PluginOption | undefined): Plugin[] {
+  if (!plugins) {
+    return [];
+  }
+
+  if (Array.isArray(plugins)) {
+    return plugins.flatMap((entry) => normalizePluginOptions(entry));
+  }
+
+  return typeof plugins === 'object' && 'name' in plugins ? [plugins as Plugin] : [];
+}
+
+async function findPackageDir(
+  projectRoot: string,
+  packageName: string,
+  fallbackSearchPaths: string[] = []
+): Promise<string> {
   const packageSegments = getPackageNameSegments(packageName);
-  let currentDir = resolve(projectRoot);
+  const searchRoots = getPackageSearchRoots(projectRoot, fallbackSearchPaths);
+
+  for (const searchRoot of searchRoots) {
+    const packageDir = await findPackageDirFromRoot(searchRoot, packageSegments);
+
+    if (packageDir) {
+      return packageDir;
+    }
+  }
+
+  throw new Error(`Unable to find package "${packageName}" from project root "${projectRoot}".`);
+}
+
+function getPackageSearchRoots(projectRoot: string, fallbackSearchPaths: string[]): string[] {
+  return [...new Set([projectRoot, ...fallbackSearchPaths].map((searchRoot) => resolve(searchRoot)))];
+}
+
+async function findPackageDirFromRoot(
+  searchRoot: string,
+  packageSegments: string[]
+): Promise<string | null> {
+  let currentDir = resolve(searchRoot);
 
   while (true) {
     const candidateDir = join(currentDir, 'node_modules', ...packageSegments);
@@ -108,13 +156,11 @@ async function findPackageDir(projectRoot: string, packageName: string): Promise
     const parentDir = dirname(currentDir);
 
     if (parentDir === currentDir) {
-      break;
+      return null;
     }
 
     currentDir = parentDir;
   }
-
-  throw new Error(`Unable to find package "${packageName}" from project root "${projectRoot}".`);
 }
 
 function getPackageNameSegments(packageName: string): string[] {

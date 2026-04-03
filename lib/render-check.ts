@@ -12,7 +12,6 @@ import {
 import { createBrowserPool, type BrowserPool } from './screenshot.ts';
 import { startServer } from './server.ts';
 import {
-  escapeAttributeValue,
   getErrorMessage,
   importFreshModule,
   isPlainObject,
@@ -108,14 +107,12 @@ export async function renderCheck(options: RenderCheckOptions): Promise<RenderCh
             `${String(screenshotIndex).padStart(4, '0')}-${sanitizePathSegment(workflow.id)}-${sanitizePathSegment(screen.id)}.png`
           );
           screenshotIndex += 1;
-          const selector = `[data-isolated-screen="${escapeAttributeValue(screen.id)}"]`;
           const baseUrl = ensureTrailingSlash(serverLease.previewUrl ?? serverLease.url);
           const url = `${baseUrl}#/screen/${encodeURIComponent(workflow.id)}/${encodeURIComponent(screen.id)}`;
 
           await browserPool.capture({
             url,
-            selector,
-            waitForSelector: selector,
+            waitForSelector: 'html',
             outputPath
           });
 
@@ -175,6 +172,7 @@ function selectWorkflows(workflows: WorkflowManifest[], workflowId?: string): Wo
 function createExternalServerLease(serverUrl: string): ServerLease {
   return {
     url: serverUrl,
+    previewUrl: resolvePreviewUrl(serverUrl),
     close: async () => {}
   };
 }
@@ -254,6 +252,17 @@ function summarizeResults(screens: ScreenCheckResult[]): RenderCheckResult['summ
       total: 0
     }
   );
+}
+
+function resolvePreviewUrl(serverUrl: string): string {
+  const normalizedUrl = ensureTrailingSlash(serverUrl);
+  const parsedUrl = new URL(normalizedUrl);
+
+  if (parsedUrl.pathname.endsWith('/preview/')) {
+    return parsedUrl.toString();
+  }
+
+  return new URL('preview/', parsedUrl).toString();
 }
 
 function ensureTrailingSlash(url: string): string {

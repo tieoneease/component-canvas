@@ -456,7 +456,10 @@ function loadPreviewModule(): string {
     '    };',
     '  }',
     '',
-    '  const componentKey = `${workflow.id}/${String(screen.component).replace(/\\.svelte$/u, "")}`;',
+    '  const componentKey = `${workflow.id}/${String(screen.component)',
+    '    .replace(/^\\.\\//u, "")',
+    '    .replace(/\\\\/gu, "/")',
+    '    .replace(/\\.svelte$/u, "")}`;',
     '  const component = componentRegistry[componentKey] ?? null;',
     '',
     '  if (!component) {',
@@ -818,13 +821,13 @@ function resolvePurityPath(path: string, aliases: Alias[], baseDir: string): str
     }
 
     const suffix = path.slice(matchedAlias.find.length).replace(/^\/+/, '');
-    return normalizePath(
+    return normalizeComparablePath(
       suffix.length > 0 ? resolve(matchedAlias.replacement, suffix) : resolve(matchedAlias.replacement)
     );
   }
 
   if (isAbsolute(path) || path.startsWith('.')) {
-    return normalizePath(resolve(baseDir, path));
+    return normalizeComparablePath(resolve(baseDir, path));
   }
 
   return undefined;
@@ -889,16 +892,16 @@ function resolveSpecifierPath(source: string, importer: string): string | undefi
   const sourceWithoutQuery = source.split('?')[0];
 
   if (sourceWithoutQuery.startsWith('/@fs/')) {
-    return normalizePath(sourceWithoutQuery.slice('/@fs/'.length));
+    return normalizeComparablePath(sourceWithoutQuery.slice('/@fs/'.length));
   }
 
   if (isAbsolute(sourceWithoutQuery)) {
-    return normalizePath(resolve(sourceWithoutQuery));
+    return normalizeComparablePath(resolve(sourceWithoutQuery));
   }
 
   if (sourceWithoutQuery.startsWith('.')) {
     const importerWithoutQuery = importer.split('?')[0];
-    return normalizePath(resolve(dirname(importerWithoutQuery), sourceWithoutQuery));
+    return normalizeComparablePath(resolve(dirname(importerWithoutQuery), sourceWithoutQuery));
   }
 
   return undefined;
@@ -922,10 +925,14 @@ function findMatchedPurityComponentPathIndex(
 }
 
 function isPathInside(path: string, directory: string): boolean {
-  const normalizedPath = normalizePath(resolve(path));
-  const normalizedDirectory = normalizePath(resolve(directory));
+  const normalizedPath = normalizeComparablePath(path);
+  const normalizedDirectory = normalizeComparablePath(directory);
 
   return normalizedPath === normalizedDirectory || normalizedPath.startsWith(`${normalizedDirectory}/`);
+}
+
+function normalizeComparablePath(path: string): string {
+  return normalizePath(resolve(path)).replace(/^\/private(?=\/var\/)/u, '');
 }
 
 function getDefaultExport(module: unknown): unknown {

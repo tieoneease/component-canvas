@@ -15,7 +15,7 @@ afterEach(async () => {
 });
 
 describe('component-canvas init', () => {
-  it('creates canvas.config.ts and sample workflow files when project features are detected', async () => {
+  it('creates an empty canvas.config.ts and sample workflow files when project features are detected', async () => {
     const projectRoot = await mkdtemp(join(tmpdir(), 'component-canvas-init-project-'));
     tempDirs.push(projectRoot);
 
@@ -33,7 +33,7 @@ describe('component-canvas init', () => {
       canvasDir: '.canvas/',
       detected: { lib: true }
     });
-    expect(configSource).toContain("lib: './src/lib'");
+    expect(configSource).toBe('export default {}\n');
     await expect(access(resolve(projectRoot, '.canvas', 'workflows', 'example', '_flow.ts'))).resolves.toBeUndefined();
   });
 

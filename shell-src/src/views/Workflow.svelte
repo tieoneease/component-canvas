@@ -29,7 +29,7 @@
   let stats = $derived(getWorkflowStats(workflow));
 </script>
 
-<section class="workflow-view">
+<section class="workflow-view" data-workflow-id={workflow?.id ?? undefined}>
   {#if workflow}
     <header class="workflow-view__header panel">
       <div>

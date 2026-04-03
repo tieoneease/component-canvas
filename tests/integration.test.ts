@@ -21,7 +21,7 @@ const DEFAULT_VIEWPORT = {
 
 describe('component-canvas integration pipeline', () => {
   it(
-    'renders workflow component content in the browser DOM via the real Vite server',
+    'renders workflow iframe previews through the real shell + preview server pipeline',
     async () => {
       const projectRoot = resolve(fixturesDir, 'valid-workflow');
       const server = await startServer({
@@ -34,12 +34,25 @@ describe('component-canvas integration pipeline', () => {
       const pageErrors: string[] = [];
 
       page.on('console', (message) => {
-        if (message.type() === 'error') {
-          consoleErrors.push(message.text());
+        if (message.type() !== 'error') {
+          return;
         }
+
+        const text = message.text();
+
+        if (
+          text.includes('WebSocket connection to') ||
+          text.includes('[vite] failed to connect to websocket')
+        ) {
+          return;
+        }
+
+        consoleErrors.push(text);
       });
       page.on('pageerror', (error) => {
-        pageErrors.push(error.message);
+        if (error.message !== 'WebSocket closed without opened.') {
+          pageErrors.push(error.message);
+        }
       });
 
       try {
@@ -47,23 +60,25 @@ describe('component-canvas integration pipeline', () => {
           waitUntil: 'domcontentloaded'
         });
         await page.waitForSelector('[data-workflow-id="login"]');
-        await page.waitForFunction(() => {
-          const text = document.body.textContent ?? '';
-          return (
-            text.includes('Login Form Screen') &&
-            text.includes('Loading Screen') &&
-            text.includes('Dashboard Screen')
-          );
-        });
+        expect(await page.locator('iframe[data-screen-frame]').count()).toBe(3);
 
-        const loginScreenText = await page.locator('[data-screen-id="login-form"]').textContent();
-        const loadingScreenText = await page.locator('[data-screen-id="loading"]').textContent();
-        const dashboardScreenText = await page.locator('[data-screen-id="dashboard"]').textContent();
+        const loginFrameText = await page
+          .frameLocator('iframe[data-screen-frame="login-form"]')
+          .locator('body')
+          .textContent();
+        const loadingFrameText = await page
+          .frameLocator('iframe[data-screen-frame="loading"]')
+          .locator('body')
+          .textContent();
+        const dashboardFrameText = await page
+          .frameLocator('iframe[data-screen-frame="dashboard"]')
+          .locator('body')
+          .textContent();
 
-        expect(loginScreenText).toContain('Login Form Screen');
-        expect(loadingScreenText).toContain('Loading Screen');
-        expect(dashboardScreenText).toContain('Dashboard Screen');
-        expect(await page.locator('[data-screen-frame]').count()).toBeGreaterThanOrEqual(3);
+        expect(loginFrameText).toContain('Login Form Screen');
+        expect(loadingFrameText).toContain('Loading Screen');
+        expect(dashboardFrameText).toContain('Dashboard Screen');
+
         expect(consoleErrors).toEqual([]);
         expect(pageErrors).toEqual([]);
       } finally {

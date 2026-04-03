@@ -406,7 +406,11 @@
               class="isolated-screen-panel__frame"
               style={`width:${viewport.width}px;height:${viewport.height}px;`}
             >
-              <iframe src={isolatedPreviewSrc} title={getScreenTitle(selectedScreen)}></iframe>
+              <iframe
+                src={isolatedPreviewSrc}
+                title={getScreenTitle(selectedScreen)}
+                data-isolated-screen={selectedScreen.id}
+              ></iframe>
             </div>
           </div>
         </section>

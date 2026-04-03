@@ -25,7 +25,11 @@ interface ExportMatch {
 const resolutionCache = new Map<string, Promise<string | null>>();
 const packageMetadataCache = new Map<string, Promise<PackageMetadata | null>>();
 
-export function resolveFromProject(projectRoot: string, packages: string[]): Plugin {
+export function resolveFromProject(
+  projectRoot: string,
+  packages: string[],
+  fallbackSearchPaths: string[] = []
+): Plugin {
   const targetedPackages = [...new Set(packages)];
   let nodeModulesDirPromise: Promise<string | null> | undefined;
   const pluginCache = new Map<string, Promise<string | null>>();
@@ -45,7 +49,10 @@ export function resolveFromProject(projectRoot: string, packages: string[]): Plu
       }
 
       const pending = (async () => {
-        const nodeModulesDir = await (nodeModulesDirPromise ??= findNearestNodeModulesDir(projectRoot));
+        const nodeModulesDir = await (nodeModulesDirPromise ??= findNearestNodeModulesDir(
+          projectRoot,
+          fallbackSearchPaths
+        ));
 
         if (!nodeModulesDir) {
           return null;
@@ -99,7 +106,24 @@ export async function resolveFromExports(
   return pending;
 }
 
-async function findNearestNodeModulesDir(startDir: string): Promise<string | null> {
+async function findNearestNodeModulesDir(
+  startDir: string,
+  fallbackSearchPaths: string[] = []
+): Promise<string | null> {
+  const searchRoots = [...new Set([startDir, ...fallbackSearchPaths].map((searchRoot) => resolve(searchRoot)))];
+
+  for (const searchRoot of searchRoots) {
+    const nodeModulesDir = await findNearestNodeModulesDirFromRoot(searchRoot);
+
+    if (nodeModulesDir) {
+      return nodeModulesDir;
+    }
+  }
+
+  return null;
+}
+
+async function findNearestNodeModulesDirFromRoot(startDir: string): Promise<string | null> {
   let currentDir = resolve(startDir);
 
   while (true) {

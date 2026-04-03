@@ -2,11 +2,11 @@ import { createServer as createHttpServer, type IncomingMessage, type Server, ty
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { Connect, InlineConfig, ViteDevServer } from 'vite';
+import type { Connect, InlineConfig, UserConfig, ViteDevServer } from 'vite';
 
 import { SvelteAdapter } from './adapter.ts';
 import { loadConfig } from './config.ts';
-import { composePreviewConfig, resolvePackageEntry } from './project.ts';
+import { composePreviewConfig, loadProjectViteConfig, resolvePackageEntry } from './project.ts';
 import { resolveFromProject } from './resolve-plugin.ts';
 import { getErrorMessage, pathExists } from './utils.ts';
 import canvasVitePlugin, {
@@ -38,6 +38,7 @@ const MAX_PORT_ATTEMPTS = 20;
 const VITE_REQUEST_PREFIXES = ['/@fs', '/@id', '/@vite', '/__', '/node_modules', '/src', '/virtual:'];
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const packageResolutionFallbacks = [packageRoot];
 const shellDistDir = resolve(packageRoot, 'shell', 'dist');
 
 export async function startServer(options: ServerOptions): Promise<StartedServer> {
@@ -58,23 +59,42 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
   const sseMiddleware = createSSEMiddleware(resolvedCanvasDir);
   const manifestsApiMiddleware = createManifestsAPIMiddleware(resolvedCanvasDir);
   const shellMiddleware = await createShellMiddleware();
+  const projectViteConfig = await loadProjectViteConfig(
+    resolvedProjectRoot,
+    packageResolutionFallbacks
+  );
+  const projectAliases = extractProjectAliases(projectViteConfig);
 
-  const previewConfig = await composePreviewConfig(resolvedProjectRoot, [
-    resolveFromProject(resolvedProjectRoot, ['svelte', '@sveltejs/vite-plugin-svelte', 'vite']),
-    canvasVitePlugin({
-      canvasDir: resolvedCanvasDir,
-      projectRoot: resolvedProjectRoot,
-      mocks: resolvedMocks,
-      purity: canvasConfig?.purity ?? adapter.defaultPurityRules()
-    })
-  ]);
+  const previewConfig = await composePreviewConfig(
+    resolvedProjectRoot,
+    [
+      resolveFromProject(
+        resolvedProjectRoot,
+        ['svelte', '@sveltejs/vite-plugin-svelte', 'vite'],
+        packageResolutionFallbacks
+      ),
+      canvasVitePlugin({
+        canvasDir: resolvedCanvasDir,
+        projectRoot: resolvedProjectRoot,
+        aliases: projectAliases,
+        mocks: resolvedMocks,
+        purity: canvasConfig?.purity ?? adapter.defaultPurityRules()
+      })
+    ],
+    packageResolutionFallbacks
+  );
 
   let previewServer: ViteDevServer | undefined;
   let httpServer: Server | undefined;
   let closed = false;
 
   try {
-    previewServer = await createPreviewServer(resolvedProjectRoot, previewConfig, options.logLevel);
+    previewServer = await createPreviewServer(
+      resolvedProjectRoot,
+      previewConfig,
+      options.logLevel,
+      packageResolutionFallbacks
+    );
     const previewMiddleware = createMountedPreviewMiddleware(basePreviewMiddleware, previewServer);
     httpServer = createHttpServer((req, res) => {
       handleRequest({
@@ -118,9 +138,10 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
 async function createPreviewServer(
   projectRoot: string,
   previewConfig: InlineConfig,
-  logLevel: ServerOptions['logLevel']
+  logLevel: ServerOptions['logLevel'],
+  fallbackSearchPaths: string[] = []
 ): Promise<ViteDevServer> {
-  const viteEntry = await resolvePackageEntry(projectRoot, 'vite');
+  const viteEntry = await resolvePackageEntry(projectRoot, 'vite', fallbackSearchPaths);
   const viteModule = (await import(viteEntry.url)) as {
     createServer?: CreateViteServer;
   };
@@ -213,7 +234,11 @@ function handleRequest(options: {
   const pathname = getRequestPath(req);
 
   if (pathname === '/preview/api/manifests/stream') {
+    const originalUrl = req.url;
+    req.url = stripPreviewPrefix(req.url);
     invokeMiddleware(sseMiddleware, req, res, previewServer, () => {
+      req.url = originalUrl;
+
       if (!isResponseHandled(res)) {
         sendNotFound(res);
       }
@@ -222,7 +247,11 @@ function handleRequest(options: {
   }
 
   if (pathname === '/preview/api/manifests') {
+    const originalUrl = req.url;
+    req.url = stripPreviewPrefix(req.url);
     invokeMiddleware(manifestsApiMiddleware, req, res, previewServer, () => {
+      req.url = originalUrl;
+
       if (!isResponseHandled(res)) {
         sendNotFound(res);
       }
@@ -236,16 +265,9 @@ function handleRequest(options: {
 
     if (isViteRequestPath(strippedPathname)) {
       invokeMiddleware(previewServer.middlewares, req, res, previewServer, () => {
-        if (isResponseHandled(res)) {
-          return;
+        if (!isResponseHandled(res)) {
+          sendNotFound(res);
         }
-
-        req.url = strippedUrl;
-        invokeMiddleware(previewServer.middlewares, req, res, previewServer, () => {
-          if (!isResponseHandled(res)) {
-            sendNotFound(res);
-          }
-        });
       });
       return;
     }
@@ -418,6 +440,36 @@ function resolvePreviewRoot(root: string | undefined, projectRoot: string): stri
   }
 
   return resolve(projectRoot, root);
+}
+
+function extractProjectAliases(projectConfig: UserConfig | null): Record<string, string> | undefined {
+  const aliasConfig = projectConfig?.resolve?.alias;
+
+  if (!aliasConfig) {
+    return undefined;
+  }
+
+  if (!Array.isArray(aliasConfig)) {
+    const aliases = Object.fromEntries(
+      Object.entries(aliasConfig).filter(
+        (entry): entry is [string, string] => typeof entry[0] === 'string' && typeof entry[1] === 'string'
+      )
+    );
+
+    return Object.keys(aliases).length > 0 ? aliases : undefined;
+  }
+
+  const aliases = Object.fromEntries(
+    aliasConfig.flatMap((entry) => {
+      if (typeof entry.find === 'string' && typeof entry.replacement === 'string') {
+        return [[entry.find, entry.replacement] as const];
+      }
+
+      return [];
+    })
+  );
+
+  return Object.keys(aliases).length > 0 ? aliases : undefined;
 }
 
 function mergeStringMaps(
