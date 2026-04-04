@@ -18,8 +18,16 @@ export function screenHash(workflowId, screenId) {
   return `#/screen/${encodeURIComponent(workflowId)}/${encodeURIComponent(screenId)}`;
 }
 
+export function variantHash(workflowId, variantId) {
+  return `#/variant/${encodeURIComponent(workflowId)}/${encodeURIComponent(variantId)}`;
+}
+
 export function previewScreenSrc(workflowId, screenId) {
   return `/preview/${screenHash(workflowId, screenId)}`;
+}
+
+export function previewVariantSrc(workflowId, variantId) {
+  return `/preview/${variantHash(workflowId, variantId)}`;
 }
 
 export function parseRoute(hash) {
@@ -45,6 +53,16 @@ export function parseRoute(hash) {
       type: 'screen',
       workflowId: safeDecode(screenMatch[1]),
       screenId: safeDecode(screenMatch[2])
+    };
+  }
+
+  const variantMatch = normalizedHash.match(/^\/variant\/([^/]+)\/([^/]+)$/u);
+
+  if (variantMatch) {
+    return {
+      type: 'variant',
+      workflowId: safeDecode(variantMatch[1]),
+      variantId: safeDecode(variantMatch[2])
     };
   }
 
