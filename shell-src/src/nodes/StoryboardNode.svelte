@@ -101,7 +101,6 @@
         variants={safeVariants}
         {workflowId}
         screenId={node?.id ?? ''}
-        baseProps={node?.screen?.props ?? {}}
         {viewport}
         scale={safeVariantScale}
       />

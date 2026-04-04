@@ -19,8 +19,6 @@ export const VIEWPORT_OPTIONS = Object.values(VIEWPORTS)
 
 const DEFAULT_VIEWPORT = VIEWPORTS.desktop
 const SCREEN_NODE_HEADER_HEIGHT = 46
-const SCREEN_NODE_MAX_WIDTH = 320
-const SCREEN_NODE_MAX_HEIGHT = 320
 const DEFAULT_SCREEN_SCALE = 0.34
 const DEFAULT_VARIANT_SCALE = 0.22
 const DEFAULT_NODE_SEP = 72
@@ -75,26 +73,6 @@ export function summarizeWorkflows(workflows = []) {
   }
 }
 
-export function getScreenNodeMetrics(viewport) {
-  const normalizedViewport = normalizeViewport(viewport)
-  const scale = Math.min(
-    SCREEN_NODE_MAX_WIDTH / normalizedViewport.width,
-    SCREEN_NODE_MAX_HEIGHT / normalizedViewport.height,
-    1
-  )
-  const frameWidth = Math.max(1, Math.round(normalizedViewport.width * scale))
-  const frameHeight = Math.max(1, Math.round(normalizedViewport.height * scale))
-
-  return {
-    ...normalizedViewport,
-    scale,
-    frameWidth,
-    frameHeight,
-    nodeWidth: frameWidth,
-    nodeHeight: frameHeight + SCREEN_NODE_HEADER_HEIGHT,
-    headerHeight: SCREEN_NODE_HEADER_HEIGHT
-  }
-}
 
 export function classifyEdges(screens, transitions) {
   const safeScreenList = Array.isArray(screens) ? screens : []

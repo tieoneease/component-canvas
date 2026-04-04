@@ -78,7 +78,7 @@
     if (route.type === 'workflow' && selectedWorkflow) {
       return {
         title: selectedWorkflow.title,
-        lede: 'Pan, zoom, and inspect the live workflow graph rendered with SvelteFlow.'
+        lede: 'Scroll through the live storyboard layout.'
       };
     }
 

@@ -7,7 +7,6 @@
     variants = [],
     workflowId = '',
     screenId = '',
-    baseProps = {},
     viewport = { width: 1280, height: 720 },
     scale = 0.22
   } = $props()
