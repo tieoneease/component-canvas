@@ -544,6 +544,16 @@ function safeCloseHttpServer(server: Server): Promise<void> {
 }
 
 /**
+ * Warm up Vite's dep optimizer by transforming the preview entry module.
+ * This triggers dep discovery server-side, giving the optimizer time to
+ * re-bundle before any browser requests arrive.
+ */
+/**
+ * Warm up Vite's dep optimizer by using the documented server.warmup API.
+ * This triggers module transformation server-side, giving the optimizer
+ * time to discover and pre-bundle deps before browser requests arrive.
+ */
+/**
  * Auto-detect the project's global CSS entry point.
  * Checks canvas theme first, then common SvelteKit/Svelte CSS locations.
  */
