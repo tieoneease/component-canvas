@@ -83,7 +83,12 @@ export function resolveFromProject(
                       args.path,
                       esbuildResolveCache
                     );
-                    return resolved ? { path: resolved } : undefined;
+                    if (!resolved) return undefined;
+                    // esbuild needs real paths to read through pnpm symlinks.
+                    // resolveFromExports returns symlink-consistent paths (for
+                    // Vite's module graph), so dereference here for esbuild.
+                    const real = await realpath(resolved).catch(() => resolved);
+                    return { path: real };
                   });
                 }
               }
@@ -140,11 +145,14 @@ export async function resolveFromExports(
       return null;
     }
 
-    const symlinkDir = resolve(nodeModulesDir, ...parsedSpecifier.packageName.split('/'));
-    // Dereference pnpm symlinks: node_modules/svelte is a symlink to
-    // .pnpm/svelte@x.x.x/node_modules/svelte. esbuild needs real paths
-    // to correctly read files through pnpm's store structure.
-    const packageDir = await dereferencePackageDir(symlinkDir, cache);
+    // Use the symlink path (not realpath) for Vite's module graph consistency.
+    // If we dereference, node_modules/svelte/src/store/index-client.js resolves to
+    // .pnpm/svelte@5.x/.../store/index-client.js, but relative imports FROM that
+    // file (../index-client.js) produce .pnpm/.../index-client.js — a different
+    // module ID than the symlink path. This causes Vite to load two copies of
+    // the Svelte runtime with separate state (untrack becomes undefined in one).
+    // The esbuild plugin handles realpath separately in its own module graph.
+    const packageDir = resolve(nodeModulesDir, ...parsedSpecifier.packageName.split('/'));
     const packageMetadata = await loadPackageMetadata(packageDir, cache);
 
     if (!packageMetadata) {
