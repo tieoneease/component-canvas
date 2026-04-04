@@ -222,23 +222,26 @@ function createMountedPreviewMiddleware(
       return;
     }
 
-    const sourceHtml = previewHtml.replace(
-      '<script type="module" src="/@id/__x00__component-canvas:preview"></script>',
-      '<script type="module">import "virtual:canvas-preview";</script>'
-    );
+    // Inject Vite's HMR client and rewrite the virtual module reference.
+    // We intentionally skip server.transformIndexHtml() because it creates
+    // an HTML proxy module whose URL (/@id/__x00__/preview/index.html
+    // ?html-proxy&index=0.js) doesn't match any module in the graph → 404.
+    // Instead, we inject @vite/client manually and use a direct module URL
+    // that Vite's module pipeline can resolve.
+    const base = previewServer.config.base || '/';
+    const viteClient = `<script type="module" src="${base}@vite/client"></script>`;
+    const transformedHtml = previewHtml
+      .replace('<head>', `<head>\n  ${viteClient}`)
+      .replace(
+        'src="/@id/__x00__component-canvas:preview"',
+        `src="${base}@id/__x00__component-canvas:preview"`
+      );
 
-    void previewServer
-      .transformIndexHtml('/preview/', sourceHtml)
-      .then((transformedHtml) => {
-        if (isResponseHandled(res)) {
-          return;
-        }
+    if (isResponseHandled(res)) {
+      return;
+    }
 
-        originalEnd(transformedHtml as never);
-      })
-      .catch((error) => {
-        sendError(res, error, previewServer);
-      });
+    originalEnd(transformedHtml as never);
   };
 }
 

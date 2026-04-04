@@ -62,6 +62,13 @@ describe('component-canvas integration pipeline', () => {
         await page.waitForSelector('[data-workflow-id="login"]');
         expect(await page.locator('iframe[data-screen-frame]').count()).toBe(3);
 
+        // Wait for iframe content to render — module loading in the preview
+        // server may take a moment since we skip transformIndexHtml.
+        await page
+          .frameLocator('iframe[data-screen-frame="login-form"]')
+          .locator('#app > *')
+          .waitFor({ timeout: 10_000 });
+
         const loginFrameText = await page
           .frameLocator('iframe[data-screen-frame="login-form"]')
           .locator('body')
