@@ -60,18 +60,12 @@ export function resolveFromProject(
         return {};
       }
 
-      // Exclude targeted packages from Vite's dep optimizer. When esbuild
-      // pre-bundles deps like bits-ui or lucide-svelte, it INLINES svelte
-      // internals into the dep chunks. This creates a separate copy of
-      // Svelte's runtime state (first_child_getter, active_reaction, etc.)
-      // that's never initialized by mount(). By excluding svelte from
-      // optimization, all imports go through Vite's module pipeline where
-      // our resolveId hook handles exports-map resolution correctly.
-      return {
-        optimizeDeps: {
-          exclude: [...targetedPackages]
-        }
-      };
+      // Let Vite's dep optimizer pre-bundle targeted packages normally.
+      // Our resolveId hook (below) handles runtime resolution for any imports
+      // that bypass the optimizer. No exclude needed — excluding svelte causes
+      // esbuild errors ("entry point cannot be marked as external") and dep
+      // scan failures.
+      return {};
     },
 
     async resolveId(source) {
