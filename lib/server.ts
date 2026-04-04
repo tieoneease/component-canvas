@@ -180,6 +180,17 @@ async function createPreviewServer(
     server: {
       ...previewConfig.server,
       middlewareMode: true
+    },
+    // Disable dep optimization in the preview server. The canvas preview
+    // is a controlled environment — our resolveId hook handles all resolution.
+    // Dep optimization inlines svelte internals into dep chunks, creating
+    // separate copies of runtime state (first_child_getter, etc.) that
+    // mount() never initializes. Disabling optimization ensures all deps
+    // import from shared modules resolved by our plugin pipeline.
+    optimizeDeps: {
+      ...previewConfig.optimizeDeps,
+      noDiscovery: true,
+      include: []
     }
   });
 }
