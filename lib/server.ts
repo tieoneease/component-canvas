@@ -6,6 +6,7 @@ import type { Connect, InlineConfig, UserConfig, ViteDevServer } from 'vite';
 
 import { SvelteAdapter } from './adapter.ts';
 import { loadConfig } from './config.ts';
+import { parseWorkflowManifests } from './manifest.ts';
 import {
   attachRenderRegistry,
   createRenderAPIMiddleware,
@@ -101,6 +102,21 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
     packageResolutionFallbacks
   );
 
+  // Discover canvas component files so the dep optimizer scans the right entries
+  // upfront. Without this, the optimizer scans the project's HTML/route files
+  // (e.g. SvelteKit's app.html), discovers a different dep set, and restarts
+  // when the preview loads canvas components → 504 "Outdated Optimize Dep".
+  const { workflows } = await parseWorkflowManifests(resolvedCanvasDir);
+  const canvasEntries = workflows.flatMap((wf) =>
+    wf.screens.map((s) => resolve(resolvedCanvasDir, 'workflows', wf.id, s.component))
+  );
+  if (canvasEntries.length > 0) {
+    previewConfig.optimizeDeps = {
+      ...previewConfig.optimizeDeps,
+      entries: canvasEntries
+    };
+  }
+
   let previewServer: ViteDevServer | undefined;
   let httpServer: Server | undefined;
   let closed = false;
@@ -181,17 +197,7 @@ async function createPreviewServer(
       ...previewConfig.server,
       middlewareMode: true
     },
-    // Disable dep optimization in the preview server. The canvas preview
-    // is a controlled environment — our resolveId hook handles all resolution.
-    // Dep optimization inlines svelte internals into dep chunks, creating
-    // separate copies of runtime state (first_child_getter, etc.) that
-    // mount() never initializes. Disabling optimization ensures all deps
-    // import from shared modules resolved by our plugin pipeline.
-    optimizeDeps: {
-      ...previewConfig.optimizeDeps,
-      noDiscovery: true,
-      include: []
-    }
+    optimizeDeps: previewConfig.optimizeDeps
   });
 }
 

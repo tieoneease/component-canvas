@@ -60,7 +60,36 @@ export function resolveFromProject(
         return {};
       }
 
-      return {};
+      // esbuild (Vite's dep optimizer) inlines svelte internals into dep chunks
+      // (bits-ui, lucide-svelte, etc.) creating duplicate runtime state that
+      // mount() never initializes. Fix: externalize svelte imports when they
+      // appear as dependencies of OTHER packages (args.kind === 'import-statement'
+      // with an importer), but NOT when svelte is the entry point itself
+      // (args.kind === 'entry-point'). This prevents inlining while allowing
+      // svelte to be pre-bundled as its own chunk.
+      const escapedNames = targetedPackages.map((name) => escapeRegExp(name));
+      const esbuildFilter = new RegExp(`^(?:${escapedNames.join('|')})(?:/|$)`);
+
+      return {
+        optimizeDeps: {
+          esbuildOptions: {
+            plugins: [
+              {
+                name: 'canvas-externalize-svelte-in-deps',
+                setup(build) {
+                  build.onResolve({ filter: esbuildFilter }, async (args) => {
+                    // Let entry points be bundled normally (svelte itself)
+                    if (args.kind === 'entry-point') return undefined;
+                    // Externalize svelte imports from other packages so
+                    // they reference the shared runtime module at runtime
+                    return { path: args.path, external: true };
+                  });
+                }
+              }
+            ]
+          }
+        }
+      };
     },
 
     async resolveId(source) {
