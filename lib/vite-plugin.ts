@@ -332,7 +332,8 @@ async function readManifestData(canvasDir: string): Promise<ParseWorkflowManifes
           file: resolve(canvasDir),
           message: `Failed to parse manifests: ${getErrorMessage(error)}`
         }
-      ]
+      ],
+      warnings: []
     };
   }
 }

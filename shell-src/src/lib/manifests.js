@@ -1,7 +1,8 @@
 export function emptyManifestState() {
   return {
     workflows: [],
-    errors: []
+    errors: [],
+    warnings: []
   };
 }
 
@@ -9,17 +10,20 @@ export function normalizeManifestPayload(payload) {
   if (Array.isArray(payload)) {
     return {
       workflows: payload,
-      errors: []
+      errors: [],
+      warnings: []
     };
   }
 
   if (payload && typeof payload === 'object') {
     const workflows = Array.isArray(payload.workflows) ? payload.workflows : [];
     const errors = Array.isArray(payload.errors) ? payload.errors : [];
+    const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
 
     return {
       workflows,
-      errors
+      errors,
+      warnings
     };
   }
 

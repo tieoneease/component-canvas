@@ -2,13 +2,26 @@ import { readdir } from 'node:fs/promises';
 import { extname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { getErrorMessage, isNonEmptyString, isPlainObject, pathExists } from './utils.ts';
+import {
+  getErrorMessage,
+  isFiniteNumber,
+  isNonEmptyString,
+  isPlainObject,
+  pathExists
+} from './utils.ts';
+
+export interface ScreenPosition {
+  x: number;
+  y: number;
+}
 
 export interface Screen {
   id: string;
   component: string;
   title?: string;
   props?: Record<string, unknown>;
+  position?: ScreenPosition;
+  group?: string;
 }
 
 export interface Transition {
@@ -24,12 +37,18 @@ export interface Variant {
   props: Record<string, unknown>;
 }
 
+export interface ScreenGroup {
+  id: string;
+  title: string;
+}
+
 export interface WorkflowManifest {
   id: string;
   title: string;
   screens: Screen[];
   transitions: Transition[];
   variants?: Variant[];
+  groups?: ScreenGroup[];
 }
 
 export interface ManifestError {
@@ -37,16 +56,27 @@ export interface ManifestError {
   message: string;
 }
 
+export interface ManifestWarning {
+  file: string;
+  message: string;
+}
+
 export interface ParseWorkflowManifestsResult {
   workflows: WorkflowManifest[];
   errors: ManifestError[];
+  warnings: ManifestWarning[];
+}
+
+interface ManifestValidationResult {
+  errors: string[];
+  warnings: string[];
 }
 
 export async function parseWorkflowManifests(canvasDir: string): Promise<ParseWorkflowManifestsResult> {
   const workflowsDir = resolve(canvasDir, 'workflows');
 
   if (!(await pathExists(workflowsDir))) {
-    return { workflows: [], errors: [] };
+    return { workflows: [], errors: [], warnings: [] };
   }
 
   const entries = await readdir(workflowsDir, { withFileTypes: true });
@@ -57,6 +87,7 @@ export async function parseWorkflowManifests(canvasDir: string): Promise<ParseWo
 
   const workflows: WorkflowManifest[] = [];
   const errors: ManifestError[] = [];
+  const warnings: ManifestWarning[] = [];
 
   for (const workflowDir of workflowDirs) {
     const manifestFile = join(workflowDir, '_flow.ts');
@@ -86,25 +117,43 @@ export async function parseWorkflowManifests(canvasDir: string): Promise<ParseWo
     }
 
     const manifest = manifestModule.default;
-    const validationErrors = await validateManifest(workflowDir, manifest);
+    const validationResult = await validateManifest(workflowDir, manifest);
 
-    if (validationErrors.length > 0) {
-      errors.push(...validationErrors.map((message) => ({ file: manifestFile, message })));
+    if (validationResult.warnings.length > 0) {
+      warnings.push(
+        ...validationResult.warnings.map((message) => ({
+          file: manifestFile,
+          message
+        }))
+      );
+    }
+
+    if (validationResult.errors.length > 0) {
+      errors.push(
+        ...validationResult.errors.map((message) => ({
+          file: manifestFile,
+          message
+        }))
+      );
       continue;
     }
 
     workflows.push(manifest as WorkflowManifest);
   }
 
-  return { workflows, errors };
+  return { workflows, errors, warnings };
 }
 
-async function validateManifest(workflowDir: string, manifest: unknown): Promise<string[]> {
+async function validateManifest(workflowDir: string, manifest: unknown): Promise<ManifestValidationResult> {
   if (!isPlainObject(manifest)) {
-    return ['Manifest default export must be an object.'];
+    return {
+      errors: ['Manifest default export must be an object.'],
+      warnings: []
+    };
   }
 
   const errors: string[] = [];
+  const warnings: string[] = [];
   const screenIds = new Set<string>();
 
   if (!isNonEmptyString(manifest.id)) {
@@ -119,7 +168,7 @@ async function validateManifest(workflowDir: string, manifest: unknown): Promise
     errors.push('Manifest field "screens" must be an array.');
   } else {
     for (const [index, screen] of manifest.screens.entries()) {
-      await validateScreen(screen, index, workflowDir, screenIds, errors);
+      await validateScreen(screen, index, workflowDir, screenIds, errors, warnings);
     }
   }
 
@@ -141,7 +190,13 @@ async function validateManifest(workflowDir: string, manifest: unknown): Promise
     }
   }
 
-  return errors;
+  const groupIds = validateGroups(manifest, warnings);
+
+  if (Array.isArray(manifest.screens)) {
+    validateScreenGroupReferences(manifest.screens, groupIds, warnings);
+  }
+
+  return { errors, warnings };
 }
 
 async function validateScreen(
@@ -149,7 +204,8 @@ async function validateScreen(
   index: number,
   workflowDir: string,
   screenIds: Set<string>,
-  errors: string[]
+  errors: string[],
+  warnings: string[]
 ): Promise<void> {
   if (!isPlainObject(screen)) {
     errors.push(`Screen at index ${index} must be an object.`);
@@ -184,6 +240,94 @@ async function validateScreen(
 
   if ('props' in screen && screen.props !== undefined && !isPlainObject(screen.props)) {
     errors.push(`Screen "${screenLabel}" has invalid "props"; expected an object.`);
+  }
+
+  validateScreenPosition(screen, screenLabel, warnings);
+  validateScreenGroup(screen, screenLabel, warnings);
+}
+
+function validateScreenPosition(
+  screen: Record<string, unknown>,
+  screenLabel: string,
+  warnings: string[]
+): void {
+  if (!('position' in screen) || screen.position === undefined) {
+    return;
+  }
+
+  if (!isScreenPosition(screen.position)) {
+    warnings.push(
+      `Screen "${screenLabel}" has invalid "position"; expected an object with finite numeric "x" and "y".`
+    );
+    delete screen.position;
+    return;
+  }
+
+  screen.position = {
+    x: screen.position.x,
+    y: screen.position.y
+  };
+}
+
+function validateScreenGroup(screen: Record<string, unknown>, screenLabel: string, warnings: string[]): void {
+  if (!('group' in screen) || screen.group === undefined) {
+    return;
+  }
+
+  if (!isNonEmptyString(screen.group)) {
+    warnings.push(`Screen "${screenLabel}" has invalid "group"; expected a non-empty string.`);
+    delete screen.group;
+  }
+}
+
+function validateGroups(manifest: Record<string, unknown>, warnings: string[]): Set<string> {
+  if (manifest.groups === undefined) {
+    return new Set<string>();
+  }
+
+  if (!Array.isArray(manifest.groups)) {
+    warnings.push('Manifest field "groups" must be an array when provided.');
+    delete manifest.groups;
+    return new Set<string>();
+  }
+
+  const validGroups: ScreenGroup[] = [];
+  const groupIds = new Set<string>();
+
+  for (const [index, group] of manifest.groups.entries()) {
+    if (!isPlainObject(group) || !isNonEmptyString(group.id) || !isNonEmptyString(group.title)) {
+      warnings.push(`Group at index ${index} must include non-empty string "id" and "title".`);
+      continue;
+    }
+
+    validGroups.push({
+      id: group.id,
+      title: group.title
+    });
+    groupIds.add(group.id);
+  }
+
+  manifest.groups = validGroups;
+
+  return groupIds;
+}
+
+function validateScreenGroupReferences(
+  screens: unknown[],
+  groupIds: Set<string>,
+  warnings: string[]
+): void {
+  for (const [index, screen] of screens.entries()) {
+    if (!isPlainObject(screen) || !isNonEmptyString(screen.group)) {
+      continue;
+    }
+
+    if (groupIds.has(screen.group)) {
+      continue;
+    }
+
+    const screenLabel = isNonEmptyString(screen.id) ? screen.id : String(index);
+    warnings.push(`Screen "${screenLabel}" references unknown group "${screen.group}".`);
   }
 }
 
@@ -243,6 +387,10 @@ function validateVariant(
   if (!isPlainObject(variant.props)) {
     errors.push(`Variant at index ${index} has invalid "props"; expected an object.`);
   }
+}
+
+function isScreenPosition(value: unknown): value is ScreenPosition {
+  return isPlainObject(value) && isFiniteNumber(value.x) && isFiniteNumber(value.y);
 }
 
 function isObject(value: unknown): value is Record<PropertyKey, unknown> {
