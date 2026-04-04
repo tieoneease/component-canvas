@@ -407,20 +407,9 @@ async function loadComponentsModule(canvasDir: string): Promise<string> {
 function loadPreviewModule(): string {
   return [
     "import { mount, unmount } from 'svelte';",
-    '',
-    // Svelte 5 lazily initializes DOM operation getters (first_child_getter,
-    // next_sibling_getter) via init_operations(), called inside mount().
-    // Pre-bundled deps that inline svelte internals call get_first_child()
-    // during module evaluation. ES module imports are hoisted above executable
-    // code, so static imports of components would load dep chunks BEFORE
-    // mount() runs. Fix: init Svelte first, then dynamic-import components.
-    'mount(() => {}, { target: document.createElement("div") });',
-    '',
-    `const [{ workflows, errors: manifestErrors }, { default: components }] = await Promise.all([`,
-    `  import(${JSON.stringify(MANIFESTS_MODULE_ID)}),`,
-    `  import(${JSON.stringify(COMPONENTS_MODULE_ID)})`,
-    ']);',
-    `await import(${JSON.stringify(GLOBAL_CSS_MODULE_ID)});`,
+    `import { workflows, errors as manifestErrors } from ${JSON.stringify(MANIFESTS_MODULE_ID)};`,
+    `import components from ${JSON.stringify(COMPONENTS_MODULE_ID)};`,
+    `import ${JSON.stringify(GLOBAL_CSS_MODULE_ID)};`,
     '',
     'const appTarget = document.getElementById("app");',
     'const workflowList = Array.isArray(workflows) ? workflows : [];',

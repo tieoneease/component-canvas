@@ -60,35 +60,39 @@ export function resolveFromProject(
         return {};
       }
 
-      // esbuild (Vite's dep optimizer) doesn't follow package.json exports maps.
-      // It resolves svelte/internal/client as a literal filesystem path instead of
-      // reading exports["./internal/client"] → ./src/internal/client/index.js.
-      // Custom esbuild plugin resolves subpath imports using our exports-map
-      // logic, so esbuild can pre-bundle svelte correctly.
-      const esbuildResolveCache = createResolveFromExportsCache();
-      const resolvedNodeModulesDir = nodeModulesDir;
+      // Exclude targeted packages from Vite's dep optimizer. When esbuild
+      // pre-bundles deps like bits-ui or lucide-svelte, it INLINES svelte
+      // internals into the dep chunks. This creates a separate copy of
+      // Svelte's runtime state (first_child_getter, active_reaction, etc.)
+      // that's never initialized by mount(). Result: 'Cannot read properties
+      // of undefined (reading call)' when the inlined get_first_child runs.
+      //
+      // By excluding svelte from optimization, all deps import from the
+      // shared svelte modules (resolved by our resolveId hook) instead of
+      // inlined copies. The esbuild plugin marks svelte imports as external
+      // so deps can still be pre-bundled without inlining svelte.
+      const exclude = targetedPackages.filter((name) => {
+        const packageDir = resolve(nodeModulesDir, ...name.split('/'));
+        // Only exclude packages that actually exist
+        try { require('fs').accessSync(packageDir); return true; } catch { return false; }
+      });
+
       const escapedNames = targetedPackages.map((name) => escapeRegExp(name));
       const esbuildFilter = new RegExp(`^(?:${escapedNames.join('|')})(?:/|$)`);
 
       return {
         optimizeDeps: {
+          exclude: exclude.length > 0 ? exclude : undefined,
           esbuildOptions: {
             plugins: [
               {
                 name: 'canvas-resolve-project-exports',
                 setup(build) {
-                  build.onResolve({ filter: esbuildFilter }, async (args) => {
-                    const resolved = await resolveFromExports(
-                      resolvedNodeModulesDir,
-                      args.path,
-                      esbuildResolveCache
-                    );
-                    if (!resolved) return undefined;
-                    // esbuild needs real paths to read through pnpm symlinks.
-                    // resolveFromExports returns symlink-consistent paths (for
-                    // Vite's module graph), so dereference here for esbuild.
-                    const real = await realpath(resolved).catch(() => resolved);
-                    return { path: real };
+                  // Mark targeted package imports as external so esbuild
+                  // doesn't inline them into dep chunks. They'll be resolved
+                  // at runtime by Vite's module pipeline + our resolveId hook.
+                  build.onResolve({ filter: esbuildFilter }, (args) => {
+                    return { path: args.path, external: true };
                   });
                 }
               }
