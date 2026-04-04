@@ -122,6 +122,9 @@ export async function composePreviewConfig(
     if (sveltePlugin) {
       projectPlugins = [...sveltePlugin, ...projectPlugins];
     }
+    // SvelteKit provides the $lib alias (src/lib). When we strip SvelteKit
+    // plugins we lose it. Re-add if the directory exists.
+    await addSvelteKitAliases(resolvedProjectRoot, mergedConfig);
   } else if (!projectPlugins.some((p) => isSveltePlugin(p))) {
     // No Svelte plugin at all — add bare svelte() as fallback
     const sveltePlugin = await loadBareSveltePlugin(resolvedProjectRoot, fallbackSearchPaths);
@@ -160,6 +163,33 @@ async function resolvePluginOptions(plugins: PluginOption | undefined): Promise<
   return typeof plugins === 'object' && plugins !== null && 'name' in plugins
     ? [plugins as Plugin]
     : [];
+}
+
+async function addSvelteKitAliases(
+  projectRoot: string,
+  config: InlineConfig
+): Promise<void> {
+  const libDir = resolve(projectRoot, 'src', 'lib');
+
+  if (!(await pathExists(libDir))) {
+    return;
+  }
+
+  // Merge $lib alias into the existing resolve.alias config
+  const existingAlias = config.resolve?.alias;
+  const libAlias = { find: '$lib', replacement: libDir };
+
+  if (!config.resolve) {
+    config.resolve = {};
+  }
+
+  if (Array.isArray(existingAlias)) {
+    existingAlias.push(libAlias);
+  } else if (existingAlias && typeof existingAlias === 'object') {
+    (existingAlias as Record<string, string>)['$lib'] = libDir;
+  } else {
+    config.resolve.alias = [libAlias];
+  }
 }
 
 function isSveltePlugin(plugin: Plugin): boolean {
