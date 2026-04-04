@@ -408,16 +408,23 @@ function loadPreviewModule(): string {
   return [
     // Svelte 5 lazily initializes DOM operation getters (first_child_getter,
     // next_sibling_getter) via init_operations(), called inside mount().
-    // Pre-bundled dep chunks inline svelte internals and call these getters
-    // during module evaluation. Static imports are hoisted above executable
-    // code, so component imports would load dep chunks BEFORE mount() runs.
+    // See: svelte/src/internal/client/dom/operations.js → init_operations()
+    // See: svelte/src/internal/client/render.js → _mount() calls init_operations()
+    //
+    // Pre-bundled dep chunks may inline svelte internals and call these
+    // getters during module evaluation. Static imports are hoisted above
+    // executable code, so component imports would load dep chunks BEFORE
+    // mount() runs.
     //
     // Fix: import only svelte statically (no dep chunks), call mount() to
     // trigger init_operations(), then dynamic-import component modules.
+    //
+    // If Svelte moves to eager initialization in a future version, the
+    // no-op mount becomes harmless (creates and immediately discards an
+    // empty component).
     "import { mount, unmount } from 'svelte';",
     '',
-    '// Initialize Svelte runtime before loading component dep chunks.',
-    '// mount() calls init_operations() which sets up DOM operation getters.',
+    '// Initialize Svelte 5 runtime before loading component dep chunks.',
     'mount(() => {}, { target: document.createElement("div") });',
     '',
     `const [{ workflows, errors: manifestErrors }, { default: components }] = await Promise.all([`,

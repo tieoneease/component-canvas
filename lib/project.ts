@@ -192,14 +192,28 @@ async function addSvelteKitAliases(
   }
 }
 
+// Known plugin names from @sveltejs/vite-plugin-svelte and @sveltejs/kit.
+// Matching exact names avoids false positives on third-party plugins
+// (e.g., vite-plugin-svelte-inspector, @vite-pwa/sveltekit).
+const SVELTE_COMPILER_PLUGIN_NAMES = new Set([
+  'vite-plugin-svelte'
+]);
+
+const SVELTEKIT_PLUGIN_PREFIXES = [
+  'vite-plugin-sveltekit-'
+];
+
 function isSveltePlugin(plugin: Plugin): boolean {
-  const name = plugin.name?.toLowerCase() ?? '';
-  return name.includes('svelte') && !name.includes('pwa');
+  const name = plugin.name ?? '';
+  return (
+    SVELTE_COMPILER_PLUGIN_NAMES.has(name) ||
+    isSvelteKitPlugin(plugin)
+  );
 }
 
 function isSvelteKitPlugin(plugin: Plugin): boolean {
-  const name = plugin.name?.toLowerCase() ?? '';
-  return name.includes('sveltekit') || name.includes('svelte-kit');
+  const name = plugin.name ?? '';
+  return SVELTEKIT_PLUGIN_PREFIXES.some((prefix) => name.startsWith(prefix));
 }
 
 async function loadBareSveltePlugin(

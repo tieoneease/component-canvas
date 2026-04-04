@@ -63,12 +63,18 @@ export function resolveFromProject(
       // esbuild (Vite's dep optimizer) inlines svelte internals into dep chunks
       // (bits-ui, lucide-svelte, etc.) creating duplicate runtime state that
       // mount() never initializes. Fix: externalize svelte imports when they
-      // appear as dependencies of OTHER packages (args.kind === 'import-statement'
-      // with an importer), but NOT when svelte is the entry point itself
-      // (args.kind === 'entry-point'). This prevents inlining while allowing
-      // svelte to be pre-bundled as its own chunk.
-      const escapedNames = targetedPackages.map((name) => escapeRegExp(name));
-      const esbuildFilter = new RegExp(`^(?:${escapedNames.join('|')})(?:/|$)`);
+      // appear as dependencies of OTHER packages (args.kind === 'import-statement'),
+      // but NOT when svelte is the entry point itself (args.kind === 'entry-point').
+      // This prevents inlining while allowing svelte to be pre-bundled as its
+      // own chunk.
+      //
+      // Only target 'svelte' — other targetedPackages (vite, @sveltejs/vite-plugin-svelte)
+      // are build tools, never imported by browser-side dep code.
+      //
+      // NOTE: `optimizeDeps.esbuildOptions` is deprecated in Vite 6.4+ in favor of
+      // `rolldownOptions`. When Vite drops esbuild from the optimizer, this needs
+      // migration to the Rolldown equivalent.
+      const svelteFilter = /^svelte(?:\/|$)/;
 
       return {
         optimizeDeps: {
@@ -77,7 +83,7 @@ export function resolveFromProject(
               {
                 name: 'canvas-externalize-svelte-in-deps',
                 setup(build) {
-                  build.onResolve({ filter: esbuildFilter }, async (args) => {
+                  build.onResolve({ filter: svelteFilter }, (args) => {
                     // Let entry points be bundled normally (svelte itself)
                     if (args.kind === 'entry-point') return undefined;
                     // Externalize svelte imports from other packages so

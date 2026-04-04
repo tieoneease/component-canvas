@@ -233,16 +233,26 @@ function createMountedPreviewMiddleware(
     // Inject Vite's HMR client and rewrite the virtual module reference.
     // We intentionally skip server.transformIndexHtml() because it creates
     // an HTML proxy module whose URL (/@id/__x00__/preview/index.html
-    // ?html-proxy&index=0.js) doesn't match any module in the graph → 404.
-    // Instead, we inject @vite/client manually and use a direct module URL
-    // that Vite's module pipeline can resolve.
+    // ?html-proxy&index=0.js) that doesn't match any module in Vite's graph
+    // → 404. This is because our HTML is synthetic (not a file on disk).
+    //
+    // Instead, we inject @vite/client manually and rewrite the module URL
+    // to use the base path. The virtual module URL format (/@id/__x00__)
+    // is documented in Vite's plugin API: "A \0{id} virtual module id is
+    // encoded as /@id/__x00__{id} during dev."
+    //
+    // Vite client path: https://github.com/vitejs/vite/blob/main/packages/vite/src/node/server/middlewares/indexHtml.ts
     const base = previewServer.config.base || '/';
-    const viteClient = `<script type="module" src="${base}@vite/client"></script>`;
+    const VITE_CLIENT_PATH = '@vite/client';
+    const VIRTUAL_MODULE_PREFIX = '/@id/__x00__';
+    const PREVIEW_MODULE_ID = 'component-canvas:preview';
+
+    const viteClient = `<script type="module" src="${base}${VITE_CLIENT_PATH}"></script>`;
     const transformedHtml = previewHtml
       .replace('<head>', `<head>\n  ${viteClient}`)
       .replace(
-        'src="/@id/__x00__component-canvas:preview"',
-        `src="${base}@id/__x00__component-canvas:preview"`
+        `src="${VIRTUAL_MODULE_PREFIX}${PREVIEW_MODULE_ID}"`,
+        `src="${base}${VIRTUAL_MODULE_PREFIX.slice(1)}${PREVIEW_MODULE_ID}"`
       );
 
     if (isResponseHandled(res)) {
