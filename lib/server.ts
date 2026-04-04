@@ -7,6 +7,7 @@ import type { Connect, InlineConfig, UserConfig, ViteDevServer } from 'vite';
 import { SvelteAdapter } from './adapter.ts';
 import { loadConfig } from './config.ts';
 import { parseWorkflowManifests } from './manifest.ts';
+import { access, constants } from 'node:fs/promises';
 import {
   attachRenderRegistry,
   createRenderAPIMiddleware,
@@ -95,6 +96,7 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
         aliases: projectAliases,
         mocks: resolvedMocks,
         purity: canvasConfig?.purity ?? adapter.defaultPurityRules(),
+        globalCss: await detectGlobalCss(resolvedProjectRoot, resolvedCanvasDir),
         renderRegistry,
         manifestStreamStore
       })
@@ -549,4 +551,34 @@ function safeCloseHttpServer(server: Server): Promise<void> {
       resolve();
     });
   });
+}
+
+/**
+ * Auto-detect the project's global CSS entry point.
+ * Checks canvas theme first, then common SvelteKit/Svelte CSS locations.
+ */
+async function detectGlobalCss(
+  projectRoot: string,
+  canvasDir: string
+): Promise<string | undefined> {
+  // Project CSS first (includes Tailwind directives, theme variables, etc.)
+  // Canvas theme.css is a fallback for projects without a standard CSS entry.
+  const candidates = [
+    resolve(projectRoot, 'src', 'app.css'),
+    resolve(projectRoot, 'src', 'app.postcss'),
+    resolve(projectRoot, 'src', 'styles', 'global.css'),
+    resolve(projectRoot, 'src', 'global.css'),
+    resolve(canvasDir, 'theme.css')
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      await access(candidate, constants.R_OK);
+      return candidate;
+    } catch {
+      // continue
+    }
+  }
+
+  return undefined;
 }
