@@ -141,6 +141,19 @@ describe('canvasVitePlugin', () => {
     expect(previewModule).toContain('/preview/@id/__x00__component-canvas:render-');
   });
 
+  it('emits preview module support for variant routes', async () => {
+    const canvasDir = resolve(fixturesDir, 'valid-workflow/.canvas');
+    const plugin = canvasVitePlugin({ canvasDir });
+    const previewId = await plugin.resolveId?.('virtual:canvas-preview');
+    const previewModule = await plugin.load?.call({ warn: vi.fn() } as never, previewId!);
+
+    expect(previewModule).toContain('const variantMatch = normalizedHash.match(/^\\/variant\\/([^/]+)\\/([^/]+)$/u);');
+    expect(previewModule).toContain('type: "variant"');
+    expect(previewModule).toContain('function resolveVariant(workflowId, variantId) {');
+    expect(previewModule).toContain('...(screen.props ?? {}),');
+    expect(previewModule).toContain('...(variant.props ?? {})');
+  });
+
   it('adds fs allow entries through the Vite config hook without injecting aliases', () => {
     const projectRoot = resolve(fixturesDir, 'valid-workflow');
     const canvasDir = resolve(projectRoot, '.canvas');

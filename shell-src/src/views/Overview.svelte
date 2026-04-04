@@ -1,10 +1,19 @@
 <svelte:options runes={true} />
 
 <script>
-  import { Background, BackgroundVariant, SvelteFlow } from '@xyflow/svelte';
-
-  import { buildOverviewGraph, getWorkflowStats } from '../lib/flow.js';
+  import { computeStoryboardLayout, getScreenTitle, getWorkflowStats } from '../lib/flow.js';
   import { workflowHash } from '../lib/routing.js';
+
+  const OVERVIEW_VIEWPORT = { width: 1280, height: 720 };
+  const PREVIEW_WIDTH = 280;
+  const PREVIEW_HEIGHT = 220;
+  const PREVIEW_LAYOUT_OPTIONS = {
+    includeVariants: false,
+    nodeSep: 28,
+    rankSep: 38,
+    marginX: 18,
+    marginY: 18
+  };
 
   let {
     workflows = [],
@@ -12,16 +21,37 @@
     onOpenWorkflow = () => {}
   } = $props();
 
-  let cards = $derived(
-    workflows.map((workflow) => ({
-      workflow,
-      stats: getWorkflowStats(workflow),
-      graph: buildOverviewGraph(workflow)
-    }))
+  let viewClass = $derived(`overview-view${theme === 'dark' ? ' dark' : ''}`);
+  let cards = $derived.by(() =>
+    workflows.map((workflow) => {
+      const stats = getWorkflowStats(workflow);
+      const layout = computeStoryboardLayout(workflow, OVERVIEW_VIEWPORT, PREVIEW_LAYOUT_OPTIONS);
+      const fitScale = computeFitScale(layout, PREVIEW_WIDTH, PREVIEW_HEIGHT);
+
+      return {
+        workflow,
+        stats,
+        layout,
+        fitScale,
+        previewWidth: layout.width * fitScale,
+        previewHeight: layout.height * fitScale
+      };
+    })
   );
+
+  function computeFitScale(layout, maxWidth, maxHeight) {
+    const width = Number(layout?.width) || 0;
+    const height = Number(layout?.height) || 0;
+
+    if (width <= 0 || height <= 0) {
+      return 1;
+    }
+
+    return Math.min(maxWidth / width, maxHeight / height, 1);
+  }
 </script>
 
-<section class="overview-view">
+<section class={viewClass}>
   {#if workflows.length === 0}
     <div class="overview-empty">
       <h2>No workflows yet</h2>
@@ -65,29 +95,30 @@
           </div>
 
           <div class="workflow-card__preview">
-            {#if card.graph.nodes.length > 0}
-              <div class="workflow-card__preview-flow" aria-hidden="true">
-                <SvelteFlow
-                  id={`overview-${card.workflow.id}`}
-                  nodes={card.graph.nodes}
-                  edges={card.graph.edges}
-                  fitView
-                  fitViewOptions={{ padding: 0.16 }}
-                  colorMode={theme}
-                  nodesDraggable={false}
-                  nodesConnectable={false}
-                  nodesFocusable={false}
-                  edgesFocusable={false}
-                  elementsSelectable={false}
-                  panOnDrag={false}
-                  panOnScroll={false}
-                  zoomOnScroll={false}
-                  zoomOnPinch={false}
-                  zoomOnDoubleClick={false}
-                  preventScrolling={false}
+            {#if card.layout.nodes.length > 0}
+              <div
+                class="workflow-card__preview-shell"
+                style={`width:${card.previewWidth}px;height:${card.previewHeight}px;`}
+                aria-hidden="true"
+              >
+                <div
+                  class="workflow-card__preview-storyboard"
+                  style={`width:${card.layout.width}px;height:${card.layout.height}px;transform:scale(${card.fitScale});transform-origin:top left;`}
                 >
-                  <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
-                </SvelteFlow>
+                  {#each card.layout.nodes as node (node.id)}
+                    <div
+                      class="workflow-card__preview-node"
+                      data-screen-id={node.id}
+                      style={`left:${node.mainRect.x}px;top:${node.mainRect.y}px;width:${node.mainRect.width}px;height:${node.mainRect.height}px;`}
+                    >
+                      <div class="workflow-card__preview-node-header">
+                        <strong>{getScreenTitle(node.screen)}</strong>
+                      </div>
+
+                      <div class="workflow-card__preview-node-body"></div>
+                    </div>
+                  {/each}
+                </div>
               </div>
             {:else}
               <p class="workflow-card__empty">This workflow does not define any screens yet.</p>
@@ -213,6 +244,8 @@
   }
 
   .workflow-card__preview {
+    display: grid;
+    place-items: center;
     min-height: 16rem;
     border-radius: 22px;
     border: 1px solid rgba(148, 163, 184, 0.16);
@@ -221,11 +254,58 @@
     overflow: hidden;
   }
 
-  .workflow-card__preview-flow {
-    width: 100%;
-    height: 100%;
-    min-height: 16rem;
+  .workflow-card__preview-shell {
+    position: relative;
+    overflow: hidden;
+    max-width: 100%;
+    max-height: 100%;
+  }
+
+  .workflow-card__preview-storyboard {
+    position: relative;
+    overflow: hidden;
     pointer-events: none;
+  }
+
+  .workflow-card__preview-node {
+    position: absolute;
+    overflow: hidden;
+    border-radius: 24px;
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow:
+      0 18px 42px rgba(15, 23, 42, 0.14),
+      0 1px 0 rgba(255, 255, 255, 0.92) inset;
+    contain: layout paint;
+  }
+
+  .workflow-card__preview-node-header {
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    height: 46px;
+    padding: 0 1rem;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.94) 0%, rgba(248, 250, 252, 0.9) 100%),
+      rgba(255, 255, 255, 0.96);
+  }
+
+  .workflow-card__preview-node-header strong {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.94rem;
+    color: #0f172a;
+  }
+
+  .workflow-card__preview-node-body {
+    height: calc(100% - 46px);
+    background:
+      linear-gradient(180deg, rgba(224, 231, 255, 0.3), rgba(255, 255, 255, 0.85)),
+      radial-gradient(circle at top, rgba(99, 102, 241, 0.12), transparent 42%),
+      #ffffff;
   }
 
   .workflow-card__empty {
@@ -233,6 +313,38 @@
     padding: 2rem;
     color: var(--canvas-muted, #64748b);
     text-align: center;
+  }
+
+  :global(.dark) .workflow-card__preview {
+    border-color: rgba(71, 85, 105, 0.34);
+    background:
+      linear-gradient(180deg, rgba(15, 23, 42, 0.92), rgba(2, 6, 23, 0.96));
+  }
+
+  :global(.dark) .workflow-card__preview-node {
+    border-color: rgba(148, 163, 184, 0.18);
+    background: rgba(15, 23, 42, 0.94);
+    box-shadow:
+      0 22px 44px rgba(2, 6, 23, 0.34),
+      0 1px 0 rgba(255, 255, 255, 0.04) inset;
+  }
+
+  :global(.dark) .workflow-card__preview-node-header {
+    border-bottom-color: rgba(148, 163, 184, 0.14);
+    background:
+      linear-gradient(180deg, rgba(30, 41, 59, 0.98) 0%, rgba(15, 23, 42, 0.96) 100%),
+      rgba(15, 23, 42, 0.96);
+  }
+
+  :global(.dark) .workflow-card__preview-node-header strong {
+    color: #e2e8f0;
+  }
+
+  :global(.dark) .workflow-card__preview-node-body {
+    background:
+      linear-gradient(180deg, rgba(49, 46, 129, 0.22), rgba(15, 23, 42, 0.86)),
+      radial-gradient(circle at top, rgba(129, 140, 248, 0.16), transparent 42%),
+      #020617;
   }
 
   @media (max-width: 720px) {

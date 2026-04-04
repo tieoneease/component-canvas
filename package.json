@@ -29,7 +29,6 @@
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
     "@tailwindcss/vite": "^4.2.2",
     "@types/node": "^24.6.0",
-    "@xyflow/svelte": "^1.5.2",
     "svelte": "^5.0.0",
     "tailwindcss": "^4.2.2",
     "typescript": "^5.9.3",
