@@ -60,12 +60,21 @@ export function resolveFromProject(
         return {};
       }
 
-      // Let Vite's dep optimizer pre-bundle targeted packages normally.
-      // Our resolveId hook (below) handles runtime resolution for any imports
-      // that bypass the optimizer. No exclude needed — excluding svelte causes
-      // esbuild errors ("entry point cannot be marked as external") and dep
-      // scan failures.
-      return {};
+      // Exclude svelte from Vite's dep optimizer so its internals aren't
+      // inlined into pre-bundled dep chunks. When esbuild bundles deps like
+      // bits-ui, it inlines svelte's get_first_child/first_child_getter into
+      // the chunk — creating a separate copy that's never initialized by
+      // mount(). Excluding svelte forces deps to import from the shared svelte
+      // modules at runtime (resolved by our resolveId hook), ensuring one
+      // runtime instance with properly initialized state.
+      //
+      // Only exclude 'svelte' — not all targeted packages. Other packages
+      // (vite, @sveltejs/vite-plugin-svelte) are tools, not runtime deps.
+      return {
+        optimizeDeps: {
+          exclude: ['svelte']
+        }
+      };
     },
 
     async resolveId(source) {
