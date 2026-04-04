@@ -103,7 +103,24 @@ export async function composePreviewConfig(
     }
   };
   const mergedConfig = mergeConfig(projectConfig ?? {}, canvasConfig) as InlineConfig;
-  const projectPlugins = normalizePluginOptions(projectConfig?.plugins);
+  let projectPlugins = await resolvePluginOptions(projectConfig?.plugins);
+
+  // SvelteKit projects use sveltekit() which wraps the Svelte compiler with
+  // SvelteKit-specific transforms (routing, layouts, etc.). This plugin either
+  // returns a Promise that resolves to SvelteKit-specific plugins, or fails
+  // silently outside SvelteKit's build pipeline — either way it won't compile
+  // standalone .svelte files correctly.
+  //
+  // If no Svelte plugin is present after resolving the project's plugins,
+  // dynamically import the bare svelte() plugin from the project's
+  // @sveltejs/vite-plugin-svelte. This compiles .svelte files without any
+  // SvelteKit-specific behavior.
+  if (!projectPlugins.some((p) => isSveltePlugin(p))) {
+    const sveltePlugin = await loadBareSveltePlugin(resolvedProjectRoot, fallbackSearchPaths);
+    if (sveltePlugin) {
+      projectPlugins = [...sveltePlugin, ...projectPlugins];
+    }
+  }
 
   if (canvasPlugins.length > 0 || projectPlugins.length > 0) {
     mergedConfig.plugins = [...canvasPlugins, ...projectPlugins];
@@ -112,16 +129,51 @@ export async function composePreviewConfig(
   return mergedConfig;
 }
 
-function normalizePluginOptions(plugins: PluginOption | undefined): Plugin[] {
+async function resolvePluginOptions(plugins: PluginOption | undefined): Promise<Plugin[]> {
   if (!plugins) {
     return [];
   }
 
-  if (Array.isArray(plugins)) {
-    return plugins.flatMap((entry) => normalizePluginOptions(entry));
+  // Handle Promises (e.g., sveltekit() returns a Promise)
+  if (plugins instanceof Promise) {
+    try {
+      const resolved = await plugins;
+      return resolvePluginOptions(resolved as PluginOption);
+    } catch {
+      return [];
+    }
   }
 
-  return typeof plugins === 'object' && 'name' in plugins ? [plugins as Plugin] : [];
+  if (Array.isArray(plugins)) {
+    const results = await Promise.all(plugins.map((entry) => resolvePluginOptions(entry as PluginOption)));
+    return results.flat();
+  }
+
+  return typeof plugins === 'object' && plugins !== null && 'name' in plugins
+    ? [plugins as Plugin]
+    : [];
+}
+
+function isSveltePlugin(plugin: Plugin): boolean {
+  const name = plugin.name?.toLowerCase() ?? '';
+  return name.includes('svelte') && !name.includes('pwa');
+}
+
+async function loadBareSveltePlugin(
+  projectRoot: string,
+  fallbackSearchPaths: string[]
+): Promise<Plugin[] | null> {
+  try {
+    const entry = await resolvePackageEntry(projectRoot, '@sveltejs/vite-plugin-svelte', fallbackSearchPaths);
+    const mod = await import(entry.url) as { svelte?: (...args: unknown[]) => Plugin | Plugin[] };
+    if (typeof mod.svelte === 'function') {
+      const result = mod.svelte();
+      return Array.isArray(result) ? result : [result];
+    }
+  } catch {
+    // @sveltejs/vite-plugin-svelte not available
+  }
+  return null;
 }
 
 async function findPackageDir(
