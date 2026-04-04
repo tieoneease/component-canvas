@@ -106,16 +106,24 @@ export async function composePreviewConfig(
   let projectPlugins = await resolvePluginOptions(projectConfig?.plugins);
 
   // SvelteKit projects use sveltekit() which wraps the Svelte compiler with
-  // SvelteKit-specific transforms (routing, layouts, etc.). This plugin either
-  // returns a Promise that resolves to SvelteKit-specific plugins, or fails
-  // silently outside SvelteKit's build pipeline — either way it won't compile
-  // standalone .svelte files correctly.
+  // SvelteKit-specific transforms (routing, layouts, guard plugins, virtual
+  // modules, etc.) that block or break compilation of standalone .svelte files
+  // in .canvas/. The SvelteKit guard plugin rejects files outside its expected
+  // directories, and the SvelteKit compile plugin applies Kit-specific transforms.
   //
-  // If no Svelte plugin is present after resolving the project's plugins,
-  // dynamically import the bare svelte() plugin from the project's
-  // @sveltejs/vite-plugin-svelte. This compiles .svelte files without any
-  // SvelteKit-specific behavior.
-  if (!projectPlugins.some((p) => isSveltePlugin(p))) {
+  // Fix: strip ALL SvelteKit-specific plugins and replace with the bare svelte()
+  // plugin from @sveltejs/vite-plugin-svelte. This compiles .svelte files
+  // without SvelteKit-specific behavior. Non-SvelteKit svelte plugins are kept.
+  const hasSvelteKitPlugins = projectPlugins.some((p) => isSvelteKitPlugin(p));
+
+  if (hasSvelteKitPlugins) {
+    projectPlugins = projectPlugins.filter((p) => !isSveltePlugin(p));
+    const sveltePlugin = await loadBareSveltePlugin(resolvedProjectRoot, fallbackSearchPaths);
+    if (sveltePlugin) {
+      projectPlugins = [...sveltePlugin, ...projectPlugins];
+    }
+  } else if (!projectPlugins.some((p) => isSveltePlugin(p))) {
+    // No Svelte plugin at all — add bare svelte() as fallback
     const sveltePlugin = await loadBareSveltePlugin(resolvedProjectRoot, fallbackSearchPaths);
     if (sveltePlugin) {
       projectPlugins = [...sveltePlugin, ...projectPlugins];
@@ -157,6 +165,11 @@ async function resolvePluginOptions(plugins: PluginOption | undefined): Promise<
 function isSveltePlugin(plugin: Plugin): boolean {
   const name = plugin.name?.toLowerCase() ?? '';
   return name.includes('svelte') && !name.includes('pwa');
+}
+
+function isSvelteKitPlugin(plugin: Plugin): boolean {
+  const name = plugin.name?.toLowerCase() ?? '';
+  return name.includes('sveltekit') || name.includes('svelte-kit');
 }
 
 async function loadBareSveltePlugin(
