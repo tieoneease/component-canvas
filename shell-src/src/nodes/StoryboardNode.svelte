@@ -70,6 +70,7 @@
         src={previewSrc}
         loading="lazy"
         tabindex="-1"
+        data-screen-frame={node?.id ?? undefined}
         style={iframeStyle}
       ></iframe>
     </div>
