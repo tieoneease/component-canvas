@@ -7,6 +7,22 @@
       "occurrences": 1,
       "created": "2026-04-03T18:46:22.813Z",
       "lastSeen": "2026-04-03T18:46:22.813Z"
+    },
+    {
+      "id": "e0fbd28274ce",
+      "text": "SvelteKit's sveltekit() function resolves its plugins lazily — they don't appear in the flat plugin list from Vite's loadConfigFromFile. Detect SvelteKit by checking package.json for @sveltejs/kit dependency, not by scanning plugin names.",
+      "scope": "project",
+      "occurrences": 1,
+      "created": "2026-04-04T13:41:31.201Z",
+      "lastSeen": "2026-04-04T13:41:31.201Z"
+    },
+    {
+      "id": "06a3c1dc0a66",
+      "text": "Vite's transformIndexHtml fires preTransformRequest on script URLs, which races with the dep optimizer on cold starts → 504 errors. For synthetic HTML (not file-backed) in middleware mode, manually inject @vite/client instead — same pattern Astro uses (vitejs/vite#5061).",
+      "scope": "project",
+      "occurrences": 1,
+      "created": "2026-04-04T13:41:35.673Z",
+      "lastSeen": "2026-04-04T13:41:35.673Z"
     }
   ]
 }

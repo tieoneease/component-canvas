@@ -90,9 +90,18 @@ function createCanvasAgentsSource(): string {
 
 - \`canvas.config.ts\` is optional.
 - Only add it when you need:
-  - \`mocks\` to replace imports during previews
+  - \`mocks\` to replace imports that don't exist outside the framework runtime
   - \`purity\` to enforce visual-component boundaries
 - \`canvas.config.ts\` no longer accepts \`lib\`, aliases, or global CSS settings.
+
+## Mock philosophy: use real code, mock only what you must
+
+- The canvas loads your project's real vite.config, Svelte compiler, Tailwind, and dependencies.
+- **Don't mock** UI components, i18n libraries, icon packages, or anything that works in a browser.
+- **Do mock** server-only framework modules that don't exist outside the runtime:
+  - SvelteKit: \`$app/stores\`, \`$app/navigation\`, \`$app/forms\`, \`$app/environment\`
+  - API clients, auth modules, database connections
+- Real components + real translations = canvas screens match production. Mocked components diverge silently.
 
 ## Commands
 
