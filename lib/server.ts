@@ -19,9 +19,8 @@ import { getErrorMessage, getRequestPath, getRequestPathFromUrl, pathExists } fr
 import canvasVitePlugin, {
   createManifestStreamStore,
   createManifestsAPIMiddleware,
-  createSSEMiddleware,
-  getPreviewHtml,
-  hasFileExtension
+  createPreviewMiddleware,
+  createSSEMiddleware
 } from './vite-plugin.ts';
 
 export interface ServerOptions {
@@ -67,7 +66,7 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
   const resolvedMocks = mergeStringMaps(canvasConfig?.mocks, options.mocks);
   const renderRegistry = createRenderRegistry();
   const manifestStreamStore = createManifestStreamStore();
-
+  const basePreviewMiddleware = createPreviewMiddleware();
   const sseMiddleware = createSSEMiddleware({
     canvasDir: resolvedCanvasDir,
     manifestStreamStore
@@ -133,7 +132,7 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
     );
     attachRenderRegistry(previewServer, renderRegistry);
     const renderApiMiddleware = createRenderAPIMiddleware(previewServer);
-    const previewMiddleware = createTransformedPreviewMiddleware(previewServer);
+    const previewMiddleware = createMountedPreviewMiddleware(basePreviewMiddleware, previewServer);
     httpServer = createHttpServer((req, res) => {
       handleRequest({
         req,
@@ -205,41 +204,60 @@ async function createPreviewServer(
 }
 
 /**
- * Creates a middleware that serves the preview HTML with Vite's HMR client
- * injected via `transformIndexHtml`. The preview HTML uses only an external
- * `<script src>` (no inline scripts), so Vite's HTML transform injects
- * `@vite/client` and processes URLs without creating HTML proxy modules.
+ * Serves the preview HTML with Vite's HMR client manually injected.
+ *
+ * We skip server.transformIndexHtml() because it calls preTransformRequest
+ * on the virtual module URL, which races with the dep optimizer's initial
+ * scan on cold starts → 504 "Outdated Optimize Dep" → failed module imports.
+ * This is a known limitation for synthetic HTML (not backed by a file on
+ * disk) in Vite middleware mode. See vitejs/vite#5061 — Astro uses the
+ * same manual-injection pattern.
+ *
+ * The injection is minimal and uses stable Vite conventions:
+ * - /@vite/client (HMR client path)
+ * - /@id/__x00__ (virtual module URL encoding, documented in plugin API)
  */
-function createTransformedPreviewMiddleware(
+function createMountedPreviewMiddleware(
+  previewMiddleware: Middleware,
   previewServer: ViteDevServer
 ): Middleware {
   return (req, res, next) => {
-    const pathname = getRequestPath(req);
+    const originalEnd = res.end.bind(res);
+    let previewHtml: string | undefined;
 
-    if (
-      req.method !== 'GET' ||
-      pathname.startsWith('/api/') ||
-      hasFileExtension(pathname)
-    ) {
-      next();
+    res.end = ((chunk) => {
+      if (typeof chunk === 'string' || chunk instanceof Uint8Array) {
+        previewHtml = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+      }
+
+      return res;
+    }) as typeof res.end;
+
+    previewMiddleware(req, res, (error?: unknown) => {
+      res.end = originalEnd;
+      next(error);
+    });
+
+    res.end = originalEnd;
+
+    if (previewHtml === undefined) {
       return;
     }
 
-    const html = getPreviewHtml();
+    const base = previewServer.config.base || '/';
+    const viteClient = `<script type="module" src="${base}@vite/client"></script>`;
+    const transformedHtml = previewHtml
+      .replace('<head>', `<head>\n  ${viteClient}`)
+      .replace(
+        'src="/@id/__x00__component-canvas:preview"',
+        `src="${base}@id/__x00__component-canvas:preview"`
+      );
 
-    void previewServer
-      .transformIndexHtml(req.originalUrl ?? req.url ?? '/', html)
-      .then((transformedHtml) => {
-        if (isResponseHandled(res)) {
-          return;
-        }
+    if (isResponseHandled(res)) {
+      return;
+    }
 
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(transformedHtml);
-      })
-      .catch((error) => {
-        sendError(res, error, previewServer);
-      });
+    originalEnd(transformedHtml as never);
   };
 }
 

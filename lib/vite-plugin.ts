@@ -1035,10 +1035,10 @@ function getDefaultExport(module: unknown): unknown {
   return undefined;
 }
 
-export function hasFileExtension(pathname: string): boolean {
+function hasFileExtension(pathname: string): boolean {
   return extname(pathname) !== '';
 }
 
-export function getPreviewHtml(): string {
+function getPreviewHtml(): string {
   return '<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Preview</title></head><body><div id="app"></div><script type="module" src="/@id/__x00__component-canvas:preview"></script></body></html>';
 }

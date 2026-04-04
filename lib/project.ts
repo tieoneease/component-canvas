@@ -114,9 +114,9 @@ export async function composePreviewConfig(
   // Fix: strip ALL SvelteKit-specific plugins and replace with the bare svelte()
   // plugin from @sveltejs/vite-plugin-svelte. This compiles .svelte files
   // without SvelteKit-specific behavior. Non-SvelteKit svelte plugins are kept.
-  const hasSvelteKitPlugins = projectPlugins.some((p) => isSvelteKitPlugin(p));
+  const hasSvelteKit = await isSvelteKitProject(resolvedProjectRoot);
 
-  if (hasSvelteKitPlugins) {
+  if (hasSvelteKit) {
     projectPlugins = projectPlugins.filter((p) => !isSveltePlugin(p));
     const sveltePlugin = await loadBareSveltePlugin(resolvedProjectRoot, fallbackSearchPaths);
     if (sveltePlugin) {
@@ -192,28 +192,25 @@ async function addSvelteKitAliases(
   }
 }
 
-// Known plugin names from @sveltejs/vite-plugin-svelte and @sveltejs/kit.
-// Matching exact names avoids false positives on third-party plugins
-// (e.g., vite-plugin-svelte-inspector, @vite-pwa/sveltekit).
-const SVELTE_COMPILER_PLUGIN_NAMES = new Set([
-  'vite-plugin-svelte'
-]);
-
-const SVELTEKIT_PLUGIN_PREFIXES = [
-  'vite-plugin-sveltekit-'
-];
-
-function isSveltePlugin(plugin: Plugin): boolean {
-  const name = plugin.name ?? '';
-  return (
-    SVELTE_COMPILER_PLUGIN_NAMES.has(name) ||
-    isSvelteKitPlugin(plugin)
-  );
+// Detect SvelteKit by checking if the project depends on @sveltejs/kit.
+// We can't rely on plugin names because sveltekit() resolves its plugins
+// lazily — they may not appear in the flat plugin list from loadConfigFromFile.
+async function isSvelteKitProject(projectRoot: string): Promise<boolean> {
+  try {
+    const pkgPath = resolve(projectRoot, 'package.json');
+    const pkg = JSON.parse(await readFile(pkgPath, 'utf8'));
+    const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
+    return '@sveltejs/kit' in allDeps;
+  } catch {
+    return false;
+  }
 }
 
-function isSvelteKitPlugin(plugin: Plugin): boolean {
-  const name = plugin.name ?? '';
-  return SVELTEKIT_PLUGIN_PREFIXES.some((prefix) => name.startsWith(prefix));
+// Match the bare svelte compiler plugin for stripping/detection.
+function isSveltePlugin(plugin: Plugin): boolean {
+  const name = plugin.name?.toLowerCase() ?? '';
+  // Match the compiler + any SvelteKit plugins that did get resolved
+  return name.includes('svelte') && !name.includes('pwa');
 }
 
 async function loadBareSveltePlugin(
