@@ -120,11 +120,9 @@ describe('composePreviewConfig', () => {
 
     expect(config.configFile).toBe(false);
     expect(config).not.toHaveProperty('build');
-    expect(config.resolve).toMatchObject({
-      alias: {
-        '@demo': allowedPath
-      }
-    });
+    // Project alias is preserved, svelte dedupe is added for pnpm compat
+    expect(config.resolve?.dedupe).toContain('svelte');
+    expect(config.resolve?.alias).toMatchObject({ '@demo': allowedPath });
     expect(config.plugins).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ name: 'user-plugin' }),

@@ -60,58 +60,17 @@ export function resolveFromProject(
         return {};
       }
 
-      // Two-layer fix for pnpm + esbuild + package.json exports maps.
-      //
-      // Problem: esbuild doesn't follow package.json exports maps. It resolves
-      // `svelte/internal/client` as a literal filesystem path instead of reading
-      // `exports["./internal/client"]` → `./src/internal/client/index.js`.
-      // Under pnpm (where node_modules/svelte is a symlink into .pnpm/), this
-      // breaks completely.
-      //
-      // Layer 1 (esbuild plugin): Inject a custom esbuild resolver into
-      // optimizeDeps that intercepts targeted package imports and resolves them
-      // using our exports-map logic. This runs inside esbuild's own pipeline,
-      // so dep pre-bundling works correctly.
-      //
-      // Layer 2 (resolve.dedupe + alias): Point Vite's resolver at the real
-      // (symlink-dereferenced) package directory so Vite itself doesn't trip
-      // over pnpm's symlink structure.
-      //
-      // The Vite resolveId hook (below) handles runtime module serving. These
-      // config-level settings handle esbuild dep optimization.
-
-      const dedupe: string[] = [];
-      const alias: Array<{ find: string | RegExp; replacement: string }> = [];
+      // esbuild (Vite's dep optimizer) doesn't follow package.json exports maps.
+      // It resolves svelte/internal/client as a literal filesystem path instead of
+      // reading exports["./internal/client"] → ./src/internal/client/index.js.
+      // Custom esbuild plugin resolves subpath imports using our exports-map
+      // logic, so esbuild can pre-bundle svelte correctly.
       const esbuildResolveCache = createResolveFromExportsCache();
       const resolvedNodeModulesDir = nodeModulesDir;
-
-      for (const packageName of targetedPackages) {
-        const packageDir = resolve(nodeModulesDir, ...packageName.split('/'));
-        if (!(await pathExists(packageDir))) continue;
-
-        dedupe.push(packageName);
-
-        // Dereference pnpm symlinks so Vite sees the real path
-        try {
-          const realDir = await realpath(packageDir);
-          if (realDir !== resolve(packageDir)) {
-            alias.push({ find: packageName, replacement: realDir });
-          }
-        } catch {
-          // Can't dereference — resolveId hook will handle it
-        }
-      }
-
-      // Build a regex filter for the esbuild plugin: match any targeted package
-      // import (bare specifier or subpath like svelte/internal/client)
       const escapedNames = targetedPackages.map((name) => escapeRegExp(name));
       const esbuildFilter = new RegExp(`^(?:${escapedNames.join('|')})(?:/|$)`);
 
       return {
-        resolve: {
-          dedupe: dedupe.length > 0 ? dedupe : undefined,
-          alias: alias.length > 0 ? alias : undefined
-        },
         optimizeDeps: {
           esbuildOptions: {
             plugins: [

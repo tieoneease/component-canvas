@@ -88,6 +88,14 @@ export async function composePreviewConfig(
   const canvasConfig: InlineConfig = {
     configFile: false,
     plugins: [...canvasPlugins],
+    resolve: {
+      // dedupe ensures Vite always resolves svelte to one copy.
+      // No resolve.alias here — aliases interfere with the resolveFromProject
+      // plugin's resolveId hook (Vite applies aliases before resolveId, producing
+      // incorrect subpath resolution). The esbuild plugin in resolveFromProject
+      // handles the dep optimizer; the resolveId hook handles runtime.
+      dedupe: ['svelte']
+    },
     server: {
       fs: {
         allow: [resolvedProjectRoot]
