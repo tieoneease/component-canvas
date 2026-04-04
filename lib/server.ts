@@ -19,8 +19,9 @@ import { getErrorMessage, getRequestPath, getRequestPathFromUrl, pathExists } fr
 import canvasVitePlugin, {
   createManifestStreamStore,
   createManifestsAPIMiddleware,
-  createPreviewMiddleware,
-  createSSEMiddleware
+  createSSEMiddleware,
+  getPreviewHtml,
+  hasFileExtension
 } from './vite-plugin.ts';
 
 export interface ServerOptions {
@@ -66,7 +67,7 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
   const resolvedMocks = mergeStringMaps(canvasConfig?.mocks, options.mocks);
   const renderRegistry = createRenderRegistry();
   const manifestStreamStore = createManifestStreamStore();
-  const basePreviewMiddleware = createPreviewMiddleware();
+
   const sseMiddleware = createSSEMiddleware({
     canvasDir: resolvedCanvasDir,
     manifestStreamStore
@@ -132,7 +133,7 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
     );
     attachRenderRegistry(previewServer, renderRegistry);
     const renderApiMiddleware = createRenderAPIMiddleware(previewServer);
-    const previewMiddleware = createMountedPreviewMiddleware(basePreviewMiddleware, previewServer);
+    const previewMiddleware = createTransformedPreviewMiddleware(previewServer);
     httpServer = createHttpServer((req, res) => {
       handleRequest({
         req,
@@ -203,63 +204,42 @@ async function createPreviewServer(
   });
 }
 
-function createMountedPreviewMiddleware(
-  previewMiddleware: Middleware,
+/**
+ * Creates a middleware that serves the preview HTML with Vite's HMR client
+ * injected via `transformIndexHtml`. The preview HTML uses only an external
+ * `<script src>` (no inline scripts), so Vite's HTML transform injects
+ * `@vite/client` and processes URLs without creating HTML proxy modules.
+ */
+function createTransformedPreviewMiddleware(
   previewServer: ViteDevServer
 ): Middleware {
   return (req, res, next) => {
-    const originalEnd = res.end.bind(res);
-    let previewHtml: string | undefined;
+    const pathname = getRequestPath(req);
 
-    res.end = ((chunk) => {
-      if (typeof chunk === 'string' || chunk instanceof Uint8Array) {
-        previewHtml = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
-      }
-
-      return res;
-    }) as typeof res.end;
-
-    previewMiddleware(req, res, (error?: unknown) => {
-      res.end = originalEnd;
-      next(error);
-    });
-
-    res.end = originalEnd;
-
-    if (previewHtml === undefined) {
+    if (
+      req.method !== 'GET' ||
+      pathname.startsWith('/api/') ||
+      hasFileExtension(pathname)
+    ) {
+      next();
       return;
     }
 
-    // Inject Vite's HMR client and rewrite the virtual module reference.
-    // We intentionally skip server.transformIndexHtml() because it creates
-    // an HTML proxy module whose URL (/@id/__x00__/preview/index.html
-    // ?html-proxy&index=0.js) that doesn't match any module in Vite's graph
-    // → 404. This is because our HTML is synthetic (not a file on disk).
-    //
-    // Instead, we inject @vite/client manually and rewrite the module URL
-    // to use the base path. The virtual module URL format (/@id/__x00__)
-    // is documented in Vite's plugin API: "A \0{id} virtual module id is
-    // encoded as /@id/__x00__{id} during dev."
-    //
-    // Vite client path: https://github.com/vitejs/vite/blob/main/packages/vite/src/node/server/middlewares/indexHtml.ts
-    const base = previewServer.config.base || '/';
-    const VITE_CLIENT_PATH = '@vite/client';
-    const VIRTUAL_MODULE_PREFIX = '/@id/__x00__';
-    const PREVIEW_MODULE_ID = 'component-canvas:preview';
+    const html = getPreviewHtml();
 
-    const viteClient = `<script type="module" src="${base}${VITE_CLIENT_PATH}"></script>`;
-    const transformedHtml = previewHtml
-      .replace('<head>', `<head>\n  ${viteClient}`)
-      .replace(
-        `src="${VIRTUAL_MODULE_PREFIX}${PREVIEW_MODULE_ID}"`,
-        `src="${base}${VIRTUAL_MODULE_PREFIX.slice(1)}${PREVIEW_MODULE_ID}"`
-      );
+    void previewServer
+      .transformIndexHtml(req.originalUrl ?? req.url ?? '/', html)
+      .then((transformedHtml) => {
+        if (isResponseHandled(res)) {
+          return;
+        }
 
-    if (isResponseHandled(res)) {
-      return;
-    }
-
-    originalEnd(transformedHtml as never);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(transformedHtml);
+      })
+      .catch((error) => {
+        sendError(res, error, previewServer);
+      });
   };
 }
 
@@ -573,9 +553,13 @@ async function detectGlobalCss(
 ): Promise<string | undefined> {
   // Project CSS first (includes Tailwind directives, theme variables, etc.)
   // Canvas theme.css is a fallback for projects without a standard CSS entry.
+  // Extensions cover Vite's built-in preprocessor support (.css, .postcss,
+  // .scss, .sass). Less/Stylus omitted — no evidence of Svelte ecosystem use.
   const candidates = [
     resolve(projectRoot, 'src', 'app.css'),
     resolve(projectRoot, 'src', 'app.postcss'),
+    resolve(projectRoot, 'src', 'app.scss'),
+    resolve(projectRoot, 'src', 'app.sass'),
     resolve(projectRoot, 'src', 'styles', 'global.css'),
     resolve(projectRoot, 'src', 'global.css'),
     resolve(canvasDir, 'theme.css')

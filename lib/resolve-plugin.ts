@@ -71,9 +71,9 @@ export function resolveFromProject(
       // Only target 'svelte' — other targetedPackages (vite, @sveltejs/vite-plugin-svelte)
       // are build tools, never imported by browser-side dep code.
       //
-      // NOTE: `optimizeDeps.esbuildOptions` is deprecated in Vite 6.4+ in favor of
-      // `rolldownOptions`. When Vite drops esbuild from the optimizer, this needs
-      // migration to the Rolldown equivalent.
+      // NOTE: Vite may eventually replace esbuild with rolldown for dep
+      // optimization. As of Vite 7.3.0, esbuildOptions is not deprecated
+      // and no rolldownOptions alternative exists. Monitor Vite changelogs.
       const svelteFilter = /^svelte(?:\/|$)/;
 
       return {
