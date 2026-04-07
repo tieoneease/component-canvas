@@ -1,13 +1,13 @@
 {
-  "name": "@tieoneease/component-canvas",
-  "version": "0.1.0",
+  "name": "@chungsam95/component-canvas",
+  "version": "0.1.1",
   "type": "module",
   "bin": {
-    "component-canvas": "./bin/cli.ts"
+    "component-canvas": "./bin/component-canvas.js"
   },
   "files": [
-    "bin",
-    "lib",
+    "bin/component-canvas.js",
+    "dist",
     "shell/dist"
   ],
   "publishConfig": {
