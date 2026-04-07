@@ -545,6 +545,14 @@
       event.preventDefault();
     }
 
+    // A new primary touch means a fresh gesture — clear stale pointers
+    // left over from a previous gesture whose pointerup was missed.
+    if (event.pointerType === 'touch' && event.isPrimary && pointers.size > 0) {
+      pointers.clear();
+      if (isPinching) endPinch();
+      if (isPanning || pendingPan) resetPanning();
+    }
+
     // Track all pointers for pinch detection
     pointers.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
 
@@ -686,6 +694,8 @@
   }
 
   function handleLostPointerCapture(event) {
+    pointers.delete(event.pointerId);
+
     if (event.pointerId === pendingPointerId) {
       pendingPan = false;
       pendingPointerId = null;
@@ -694,6 +704,10 @@
 
     if (event.pointerId === dragPointerId) {
       resetPanning();
+    }
+
+    if (isPinching && pointers.size < 2) {
+      endPinch();
     }
   }
 
@@ -735,12 +749,17 @@
   function handleBlur() {
     spacePressed = false;
 
-    if (pendingPointerId !== null && containerElement?.hasPointerCapture?.(pendingPointerId)) {
-      containerElement.releasePointerCapture(pendingPointerId);
+    // Release all pointer captures and clear tracking
+    for (const pid of pointers.keys()) {
+      if (containerElement?.hasPointerCapture?.(pid)) {
+        containerElement.releasePointerCapture(pid);
+      }
     }
+    pointers.clear();
 
-    if (dragPointerId !== null && containerElement?.hasPointerCapture?.(dragPointerId)) {
-      containerElement.releasePointerCapture(dragPointerId);
+    if (isPinching) {
+      isPinching = false;
+      pinchStartDist = 0;
     }
 
     resetPanning();
