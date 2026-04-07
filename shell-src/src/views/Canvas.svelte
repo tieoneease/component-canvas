@@ -25,6 +25,7 @@
   const ZOOM_FACTOR = 1.05;
   const TRANSFORM_TRANSITION_MS = 120;
   const NODE_TARGET_SELECTOR = '[data-screen-id]';
+  const PAN_THRESHOLD = 5;
 
   let {
     workflows = [],
@@ -68,6 +69,11 @@
   let dragStartY = $state(0);
   let dragOriginX = $state(0);
   let dragOriginY = $state(0);
+  let pendingPan = $state(false);
+  let pendingPointerId = $state(null);
+  let pendingStartX = $state(0);
+  let pendingStartY = $state(0);
+  let pendingTarget = $state(null);
   let lastFocusRequestKey = $state('');
   let lastViewTargetKey = $state('');
   let focusedWorkflowId = $state('');
@@ -505,6 +511,18 @@
     return !target.closest(NODE_TARGET_SELECTOR);
   }
 
+  function isNodeTarget(target) {
+    if (!(target instanceof Element)) {
+      return false;
+    }
+
+    if (target.closest('[data-canvas-controls]')) {
+      return false;
+    }
+
+    return Boolean(target.closest(NODE_TARGET_SELECTOR));
+  }
+
   function canStartPanning(event) {
     if (event.button === 1) {
       return true;
@@ -531,6 +549,10 @@
     pointers.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
 
     if (pointers.size === 2) {
+      pendingPan = false;
+      pendingPointerId = null;
+      pendingTarget = null;
+
       // Two fingers down → start pinch, cancel any pan
       // Capture both pointers so move events fire reliably
       for (const pid of pointers.keys()) {
@@ -544,19 +566,36 @@
       return;
     }
 
-    // Single pointer → pan logic
-    if (dragPointerId !== null || !canStartPanning(event)) {
+    if (dragPointerId !== null || pendingPointerId !== null) {
+      return;
+    }
+
+    if (canStartPanning(event)) {
+      containerElement?.focus();
+      disableTransformAnimation();
+      event.preventDefault();
+
+      isPanning = true;
+      dragPointerId = event.pointerId;
+      dragStartX = event.clientX;
+      dragStartY = event.clientY;
+      dragOriginX = panX;
+      dragOriginY = panY;
+
+      containerElement?.setPointerCapture?.(event.pointerId);
+      return;
+    }
+
+    if (event.button !== 0 || !isNodeTarget(event.target)) {
       return;
     }
 
     containerElement?.focus();
-    disableTransformAnimation();
-    event.preventDefault();
-
-    isPanning = true;
-    dragPointerId = event.pointerId;
-    dragStartX = event.clientX;
-    dragStartY = event.clientY;
+    pendingPan = true;
+    pendingPointerId = event.pointerId;
+    pendingStartX = event.clientX;
+    pendingStartY = event.clientY;
+    pendingTarget = event.target;
     dragOriginX = panX;
     dragOriginY = panY;
 
@@ -575,6 +614,28 @@
       return;
     }
 
+    if (pendingPan && event.pointerId === pendingPointerId) {
+      const distance = Math.hypot(event.clientX - pendingStartX, event.clientY - pendingStartY);
+
+      if (distance <= PAN_THRESHOLD) {
+        return;
+      }
+
+      disableTransformAnimation();
+      isPanning = true;
+      pendingPan = false;
+      pendingPointerId = null;
+      pendingTarget = null;
+      dragPointerId = event.pointerId;
+      dragStartX = pendingStartX;
+      dragStartY = pendingStartY;
+
+      event.preventDefault();
+      panX = dragOriginX + (event.clientX - dragStartX);
+      panY = dragOriginY + (event.clientY - dragStartY);
+      return;
+    }
+
     if (!isPanning || event.pointerId !== dragPointerId) {
       return;
     }
@@ -586,11 +647,26 @@
 
   function resetPanning() {
     isPanning = false;
+    pendingPan = false;
+    pendingPointerId = null;
+    pendingTarget = null;
     dragPointerId = null;
   }
 
   function stopPanning(event) {
     pointers.delete(event.pointerId);
+
+    if (pendingPan && event.pointerId === pendingPointerId) {
+      pendingPan = false;
+      pendingPointerId = null;
+      pendingTarget = null;
+
+      if (event.currentTarget?.hasPointerCapture?.(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+
+      return;
+    }
 
     if (isPinching) {
       if (pointers.size < 2) {
@@ -610,6 +686,12 @@
   }
 
   function handleLostPointerCapture(event) {
+    if (event.pointerId === pendingPointerId) {
+      pendingPan = false;
+      pendingPointerId = null;
+      pendingTarget = null;
+    }
+
     if (event.pointerId === dragPointerId) {
       resetPanning();
     }
@@ -652,6 +734,10 @@
 
   function handleBlur() {
     spacePressed = false;
+
+    if (pendingPointerId !== null && containerElement?.hasPointerCapture?.(pendingPointerId)) {
+      containerElement.releasePointerCapture(pendingPointerId);
+    }
 
     if (dragPointerId !== null && containerElement?.hasPointerCapture?.(dragPointerId)) {
       containerElement.releasePointerCapture(dragPointerId);
