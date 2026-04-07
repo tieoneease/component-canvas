@@ -72,6 +72,14 @@
   let lastViewTargetKey = $state('');
   let focusedWorkflowId = $state('');
   let lastClearSelectionRequest = $state(0);
+
+  // Multi-pointer pinch state
+  let pointers = new Map();  // pointerId → { clientX, clientY }
+  let isPinching = false;
+  let pinchStartDist = 0;
+  let pinchStartZoom = 1;
+  let pinchStartPanX = 0;
+  let pinchStartPanY = 0;
   let selectedNodeIds = $state(new Set());
 
   let transitionResetTimer = null;
@@ -118,8 +126,28 @@
 
     window.addEventListener('keydown', handleWindowKeydown);
 
+    // Register pointer handlers with { passive: false } so preventDefault()
+    // works on mobile. Svelte's inline on* handlers may register as passive
+    // on touch devices, causing the browser to intercept the gesture.
+    const el = containerElement;
+    if (el) {
+      el.addEventListener('pointerdown', handlePointerDown, { passive: false });
+      el.addEventListener('pointermove', handlePointerMove, { passive: false });
+      el.addEventListener('pointerup', stopPanning, { passive: false });
+      el.addEventListener('pointercancel', stopPanning, { passive: false });
+      el.addEventListener('wheel', handleWheel, { passive: false });
+    }
+
     return () => {
       window.removeEventListener('keydown', handleWindowKeydown);
+
+      if (el) {
+        el.removeEventListener('pointerdown', handlePointerDown);
+        el.removeEventListener('pointermove', handlePointerMove);
+        el.removeEventListener('pointerup', stopPanning);
+        el.removeEventListener('pointercancel', stopPanning);
+        el.removeEventListener('wheel', handleWheel);
+      }
 
       if (transitionResetTimer !== null) {
         window.clearTimeout(transitionResetTimer);
@@ -386,6 +414,68 @@
     };
   }
 
+  function getPointerDist() {
+    const pts = [...pointers.values()];
+    if (pts.length < 2) return 0;
+    const dx = pts[0].clientX - pts[1].clientX;
+    const dy = pts[0].clientY - pts[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function getPointerCenter() {
+    const pts = [...pointers.values()];
+    if (pts.length < 2) return { clientX: 0, clientY: 0 };
+    return {
+      clientX: (pts[0].clientX + pts[1].clientX) / 2,
+      clientY: (pts[0].clientY + pts[1].clientY) / 2
+    };
+  }
+
+  function startPinch() {
+    isPinching = true;
+    pinchStartDist = getPointerDist();
+    pinchStartZoom = zoom;
+    pinchStartPanX = panX;
+    pinchStartPanY = panY;
+    disableTransformAnimation();
+
+    if (isPanning) {
+      resetPanning();
+    }
+  }
+
+  function updatePinch() {
+    if (!isPinching || pinchStartDist === 0) return;
+
+    const currentDist = getPointerDist();
+    const scale = currentDist / pinchStartDist;
+    const newZoom = clampScale(pinchStartZoom * scale);
+
+    const center = getPointerCenter();
+    const rect = containerElement?.getBoundingClientRect();
+    if (!rect) return;
+
+    const cx = center.clientX - rect.left;
+    const cy = center.clientY - rect.top;
+    const zoomRatio = newZoom / pinchStartZoom;
+
+    panX = cx - (cx - pinchStartPanX) * zoomRatio;
+    panY = cy - (cy - pinchStartPanY) * zoomRatio;
+    zoom = newZoom;
+  }
+
+  function endPinch() {
+    isPinching = false;
+    pinchStartDist = 0;
+
+    // Release captures
+    for (const pid of pointers.keys()) {
+      if (containerElement?.hasPointerCapture?.(pid)) {
+        containerElement.releasePointerCapture(pid);
+      }
+    }
+  }
+
   function handleWheel(event) {
     if (layout.width <= 0 || layout.height <= 0) {
       return;
@@ -432,6 +522,29 @@
   }
 
   function handlePointerDown(event) {
+    // Always prevent default for touch to stop browser gesture interference
+    if (event.pointerType === 'touch') {
+      event.preventDefault();
+    }
+
+    // Track all pointers for pinch detection
+    pointers.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
+
+    if (pointers.size === 2) {
+      // Two fingers down → start pinch, cancel any pan
+      // Capture both pointers so move events fire reliably
+      for (const pid of pointers.keys()) {
+        containerElement?.setPointerCapture?.(pid);
+      }
+      startPinch();
+      return;
+    }
+
+    if (pointers.size > 2 || isPinching) {
+      return;
+    }
+
+    // Single pointer → pan logic
     if (dragPointerId !== null || !canStartPanning(event)) {
       return;
     }
@@ -447,16 +560,26 @@
     dragOriginX = panX;
     dragOriginY = panY;
 
-    event.currentTarget?.setPointerCapture?.(event.pointerId);
+    containerElement?.setPointerCapture?.(event.pointerId);
   }
 
   function handlePointerMove(event) {
+    // Update tracked pointer position
+    if (pointers.has(event.pointerId)) {
+      pointers.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
+    }
+
+    if (isPinching && pointers.size >= 2) {
+      event.preventDefault();
+      updatePinch();
+      return;
+    }
+
     if (!isPanning || event.pointerId !== dragPointerId) {
       return;
     }
 
     event.preventDefault();
-
     panX = dragOriginX + (event.clientX - dragStartX);
     panY = dragOriginY + (event.clientY - dragStartY);
   }
@@ -467,6 +590,14 @@
   }
 
   function stopPanning(event) {
+    pointers.delete(event.pointerId);
+
+    if (isPinching) {
+      if (pointers.size < 2) {
+        endPinch();
+      }
+      return;
+    }
     if (event.pointerId !== dragPointerId) {
       return;
     }
@@ -544,11 +675,6 @@
     tabindex="0"
     aria-label="Workflow canvas"
     aria-roledescription="pan and zoom canvas"
-    onwheel={handleWheel}
-    onpointerdown={handlePointerDown}
-    onpointermove={handlePointerMove}
-    onpointerup={stopPanning}
-    onpointercancel={stopPanning}
     onlostpointercapture={handleLostPointerCapture}
     onkeydown={handleKeyDown}
     onkeyup={handleKeyUp}
