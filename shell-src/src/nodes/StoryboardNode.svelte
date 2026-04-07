@@ -17,9 +17,16 @@
     workflowId = '',
     lod = 'full',
     selected = false,
+    thumbnailSrc = null,
+    onThumbnailCapture = null,
+    variantThumbnailSrcs = {},
     onOpen = () => {},
     onSelect = () => {}
   } = $props();
+
+  let iframeLoaded = $state(false);
+  let iframeElement = $state(null);
+  let captureScheduled = $state(false);
 
   let viewportWidth = $derived(Number(viewport?.width) > 0 ? Number(viewport.width) : 1280);
   let viewportHeight = $derived(Number(viewport?.height) > 0 ? Number(viewport.height) : 720);
@@ -65,6 +72,46 @@
     if (typeof onOpen !== 'function' || !workflowId || !node?.id) return;
     onOpen(workflowId, node.id);
   }
+
+  function handleIframeLoad(event) {
+    try {
+      if (event.target?.contentDocument?.URL === 'about:blank') return;
+    } catch {
+      return;
+    }
+
+    iframeLoaded = true;
+    void scheduleThumbnailCapture();
+  }
+
+  async function scheduleThumbnailCapture() {
+    if (captureScheduled || typeof onThumbnailCapture !== 'function') return;
+    if (!iframeElement || !workflowId || !node?.id) return;
+
+    captureScheduled = true;
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    try {
+      const { captureIframeThumbnail } = await import('../lib/thumbnail-capture.js');
+      const blob = await captureIframeThumbnail(iframeElement);
+
+      if (blob && typeof onThumbnailCapture === 'function') {
+        const key = `${workflowId}/${node.id}`;
+        onThumbnailCapture(key, blob, Math.round(frameWidth), Math.round(frameHeight));
+      }
+    } catch (error) {
+      console.warn('[component-canvas] Thumbnail capture failed:', error?.message ?? error);
+    } finally {
+      captureScheduled = false;
+    }
+  }
+
+  $effect(() => {
+    void previewSrc;
+    iframeLoaded = false;
+    captureScheduled = false;
+  });
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -107,29 +154,52 @@
 
       {#if safeLod === 'card'}
         <div class="relative overflow-hidden bg-background" style="width:{frameWidth}px;height:{frameHeight}px;">
-          <div class="flex h-full w-full flex-col items-center justify-center gap-2 bg-muted/50 px-4 text-center">
-            <div class="flex size-8 items-center justify-center rounded-full border border-border bg-background/90 text-muted-foreground shadow-sm">
-              <svg class="size-4" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <rect x="2.25" y="3.75" width="11.5" height="8.5" rx="1.5" stroke="currentColor" stroke-width="1.25" />
-                <path d="M5 11h6" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" />
-              </svg>
+          {#if thumbnailSrc}
+            <img
+              src={thumbnailSrc}
+              alt="{title} preview"
+              class="h-full w-full object-cover object-top"
+              draggable="false"
+            />
+          {:else}
+            <div class="flex h-full w-full flex-col items-center justify-center gap-2 bg-muted/50 px-4 text-center">
+              <div class="flex size-8 items-center justify-center rounded-full border border-border bg-background/90 text-muted-foreground shadow-sm">
+                <svg class="size-4" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <rect x="2.25" y="3.75" width="11.5" height="8.5" rx="1.5" stroke="currentColor" stroke-width="1.25" />
+                  <path d="M5 11h6" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" />
+                </svg>
+              </div>
+              <div class="space-y-1">
+                <p class="text-xs font-semibold text-foreground">{componentName}</p>
+                <p class="text-[10px] text-muted-foreground">Preview at higher zoom</p>
+              </div>
             </div>
-            <div class="space-y-1">
-              <p class="text-xs font-semibold text-foreground">{componentName}</p>
-              <p class="text-[10px] text-muted-foreground">Preview at higher zoom</p>
-            </div>
-          </div>
+          {/if}
         </div>
       {:else}
         <div class="relative overflow-hidden bg-background" style="width:{frameWidth}px;height:{frameHeight}px;">
+          {#if thumbnailSrc && !iframeLoaded}
+            <img
+              src={thumbnailSrc}
+              alt="{title} preview"
+              class="absolute inset-0 h-full w-full object-cover object-top"
+              draggable="false"
+            />
+          {/if}
+
           <iframe
+            bind:this={iframeElement}
             title="{title} preview"
             src={previewSrc}
             loading="lazy"
             tabindex="-1"
             data-screen-frame={node?.id ?? undefined}
             class="pointer-events-none block border-0 bg-background"
+            class:opacity-0={thumbnailSrc && !iframeLoaded}
+            class:absolute={thumbnailSrc && !iframeLoaded}
+            class:inset-0={thumbnailSrc && !iframeLoaded}
             style="width:{viewportWidth}px;height:{viewportHeight}px;transform:scale({safeScreenScale});transform-origin:top left;"
+            onload={handleIframeLoad}
           ></iframe>
         </div>
 
@@ -159,6 +229,8 @@
           {viewport}
           scale={safeVariantScale}
           lod={safeLod}
+          thumbnailSrcs={variantThumbnailSrcs}
+          onThumbnailCapture={onThumbnailCapture}
         />
       </div>
     {/if}

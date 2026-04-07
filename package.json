@@ -20,6 +20,7 @@
   "dependencies": {
     "commander": "^14.0.1",
     "dagre": "^0.8.5",
+    "html2canvas": "^1.4.1",
     "playwright": "^1.58.2",
     "sirv": "^3.0.2",
     "svelte2tsx": "^0.7.53",

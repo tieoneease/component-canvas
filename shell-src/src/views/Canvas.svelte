@@ -6,6 +6,14 @@
   import { computeMultiWorkflowLayout, getScreenTitle, offsetLayout } from '../lib/flow.js';
   import FlowArrow from '../lib/FlowArrow.svelte';
   import GroupFrame from '../lib/GroupFrame.svelte';
+  import {
+    deleteThumbnail,
+    deleteThumbnailsByPrefix,
+    getThumbnail,
+    listThumbnailKeys,
+    openThumbnailCache,
+    putThumbnail
+  } from '../lib/thumbnail-cache.js';
   import StoryboardNode from '../nodes/StoryboardNode.svelte';
 
   const DEFAULT_VIEWPORT = { width: 1280, height: 720 };
@@ -20,6 +28,7 @@
   const CANVAS_MARGIN = 48;
   const CLUSTER_GAP = 200;
   const ARROW_MARKER_ID = 'canvas-flow-arrow-head';
+  const VIEWPORT_CULLING_MARGIN = 300;
   const MIN_ZOOM = 0.1;
   const MAX_ZOOM = 2;
   const ZOOM_FACTOR = 1.05;
@@ -87,13 +96,28 @@
   let pinchStartPanX = 0;
   let pinchStartPanY = 0;
   let selectedNodeIds = $state(new Set());
+  let thumbnailCache = $state(null);
+  let thumbnailUrls = $state(new Map());
 
   let transitionResetTimer = null;
+  let isCanvasMounted = false;
 
   let canvasStyle = $derived(
     `width:${Math.max(layout.width, 0)}px;height:${Math.max(layout.height, 0)}px;transform:translate(${panX}px, ${panY}px) scale(${zoom});transform-origin:0 0;will-change:transform;transition:${animateTransform ? 'transform 0.1s ease-out' : 'none'};`
   );
   let lod = $derived(zoom < 0.15 ? 'minimal' : zoom < 0.5 ? 'card' : 'full');
+  let visibleWorldRect = $derived.by(() => {
+    if (containerWidth <= 0 || containerHeight <= 0 || zoom <= 0) {
+      return null;
+    }
+
+    return {
+      x: (-panX / zoom) - VIEWPORT_CULLING_MARGIN,
+      y: (-panY / zoom) - VIEWPORT_CULLING_MARGIN,
+      width: (containerWidth / zoom) + (VIEWPORT_CULLING_MARGIN * 2),
+      height: (containerHeight / zoom) + (VIEWPORT_CULLING_MARGIN * 2)
+    };
+  });
   let zoomLabel = $derived(`${Math.round(zoom * 100)}%`);
   let selectableNodes = $derived.by(() => {
     const lookup = new Map();
@@ -122,6 +146,7 @@
   });
 
   onMount(() => {
+    isCanvasMounted = true;
     emitSelectionChange(selectedNodeIds);
 
     const handleWindowKeydown = (event) => {
@@ -144,7 +169,10 @@
       el.addEventListener('wheel', handleWheel, { passive: false });
     }
 
+    void initThumbnailCache();
+
     return () => {
+      isCanvasMounted = false;
       window.removeEventListener('keydown', handleWindowKeydown);
 
       if (el) {
@@ -158,6 +186,9 @@
       if (transitionResetTimer !== null) {
         window.clearTimeout(transitionResetTimer);
       }
+
+      revokeThumbnailUrls(thumbnailUrls);
+      thumbnailUrls = new Map();
 
       if (typeof onSelectionChange === 'function') {
         onSelectionChange([]);
@@ -238,6 +269,81 @@
     setSelectedNodeIds(nextSelectedNodeIds);
   });
 
+  $effect(() => {
+    if (workflows.length === 0 || thumbnailUrls.size === 0) {
+      return;
+    }
+
+    const validKeys = new Set();
+    const workflowIds = new Set();
+
+    for (const workflow of workflows) {
+      const workflowId = typeof workflow?.id === 'string' ? workflow.id : '';
+
+      if (!workflowId) {
+        continue;
+      }
+
+      workflowIds.add(workflowId);
+
+      for (const screen of Array.isArray(workflow?.screens) ? workflow.screens : []) {
+        if (screen?.id) {
+          validKeys.add(`${workflowId}/${screen.id}`);
+        }
+      }
+
+      for (const variant of Array.isArray(workflow?.variants) ? workflow.variants : []) {
+        if (variant?.id) {
+          validKeys.add(`${workflowId}/${variant.id}`);
+        }
+      }
+    }
+
+    const nextThumbnailUrls = new Map(thumbnailUrls);
+    const staleKeys = [];
+    const removedWorkflowIds = new Set();
+
+    for (const [key, url] of thumbnailUrls) {
+      if (validKeys.has(key)) {
+        continue;
+      }
+
+      nextThumbnailUrls.delete(key);
+      staleKeys.push(key);
+      URL.revokeObjectURL(url);
+
+      const slashIndex = key.indexOf('/');
+      const workflowId = slashIndex === -1 ? key : key.slice(0, slashIndex);
+
+      if (workflowId && !workflowIds.has(workflowId)) {
+        removedWorkflowIds.add(workflowId);
+      }
+    }
+
+    if (staleKeys.length === 0) {
+      return;
+    }
+
+    thumbnailUrls = nextThumbnailUrls;
+
+    if (!thumbnailCache) {
+      return;
+    }
+
+    for (const workflowId of removedWorkflowIds) {
+      void deleteThumbnailsByPrefix(thumbnailCache, `${workflowId}/`);
+    }
+
+    for (const key of staleKeys) {
+      const slashIndex = key.indexOf('/');
+      const workflowId = slashIndex === -1 ? key : key.slice(0, slashIndex);
+
+      if (!removedWorkflowIds.has(workflowId)) {
+        void deleteThumbnail(thumbnailCache, key);
+      }
+    }
+  });
+
   function setsEqual(left, right) {
     if (left === right) {
       return true;
@@ -316,6 +422,124 @@
     }
 
     toggleSelection(`${workflowId}/${nodeId}`);
+  }
+
+  function revokeThumbnailUrls(urls) {
+    for (const url of urls.values()) {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  function getThumbnailSrc(screenKey) {
+    return thumbnailUrls.get(screenKey) ?? null;
+  }
+
+  function getVariantThumbnailSrcs(workflowId, variants) {
+    const variantThumbnailSrcs = {};
+
+    for (const variant of Array.isArray(variants) ? variants : []) {
+      const variantId = typeof variant?.id === 'string' ? variant.id : '';
+
+      if (!workflowId || !variantId) {
+        continue;
+      }
+
+      const thumbnailSrc = getThumbnailSrc(`${workflowId}/${variantId}`);
+
+      if (thumbnailSrc) {
+        variantThumbnailSrcs[variantId] = thumbnailSrc;
+      }
+    }
+
+    return variantThumbnailSrcs;
+  }
+
+  async function initThumbnailCache() {
+    try {
+      const cache = await openThumbnailCache();
+
+      if (!isCanvasMounted) {
+        return;
+      }
+
+      thumbnailCache = cache;
+      const keys = await listThumbnailKeys(cache);
+      const nextThumbnailUrls = new Map();
+
+      for (const key of keys) {
+        const entry = await getThumbnail(cache, key);
+
+        if (!isCanvasMounted) {
+          revokeThumbnailUrls(nextThumbnailUrls);
+          return;
+        }
+
+        if (entry?.blob) {
+          nextThumbnailUrls.set(key, URL.createObjectURL(entry.blob));
+        }
+      }
+
+      const mergedThumbnailUrls = new Map(nextThumbnailUrls);
+
+      for (const [key, url] of thumbnailUrls) {
+        const loadedUrl = mergedThumbnailUrls.get(key);
+
+        if (loadedUrl && loadedUrl !== url) {
+          URL.revokeObjectURL(loadedUrl);
+        }
+
+        mergedThumbnailUrls.set(key, url);
+      }
+
+      thumbnailUrls = mergedThumbnailUrls;
+    } catch (error) {
+      console.warn('[component-canvas] Failed to initialize thumbnail cache:', error?.message ?? error);
+    }
+  }
+
+  async function handleThumbnailCapture(screenKey, blob, width, height) {
+    if (!screenKey || !blob) {
+      return;
+    }
+
+    try {
+      const cache = thumbnailCache ?? await openThumbnailCache();
+
+      if (isCanvasMounted && !thumbnailCache) {
+        thumbnailCache = cache;
+      }
+
+      await putThumbnail(cache, screenKey, blob, width, height);
+
+      if (!isCanvasMounted) {
+        return;
+      }
+
+      const nextThumbnailUrls = new Map(thumbnailUrls);
+      const oldUrl = nextThumbnailUrls.get(screenKey);
+
+      if (oldUrl) {
+        URL.revokeObjectURL(oldUrl);
+      }
+
+      nextThumbnailUrls.set(screenKey, URL.createObjectURL(blob));
+      thumbnailUrls = nextThumbnailUrls;
+    } catch (error) {
+      console.warn('[component-canvas] Failed to cache thumbnail:', error?.message ?? error);
+    }
+  }
+
+  function isRectInViewport(left, top, width, height) {
+    if (!visibleWorldRect) {
+      return true;
+    }
+
+    return (
+      left + width > visibleWorldRect.x
+      && left < visibleWorldRect.x + visibleWorldRect.width
+      && top + height > visibleWorldRect.y
+      && top < visibleWorldRect.y + visibleWorldRect.height
+    );
   }
 
   function clampScale(value) {
@@ -813,21 +1037,29 @@
         {/if}
 
         {#each clusterLayout.nodes as node (node.id)}
+          {@const nodeInViewport = isRectInViewport(node.left, node.top, node.width, node.height)}
           <div
             class="absolute z-[2]"
             style={`left:${node.left}px;top:${node.top}px;width:${node.width}px;`}
           >
-            <StoryboardNode
-              {node}
-              {viewport}
-              {lod}
-              selected={isNodeSelected(cluster.workflow?.id ?? '', node.id)}
-              screenScale={cluster.layout.screenScale}
-              variantScale={cluster.layout.variantScale}
-              workflowId={cluster.workflow?.id ?? ''}
-              onOpen={onOpenScreen}
-              onSelect={(nodeId) => handleNodeSelect(cluster.workflow?.id ?? '', nodeId)}
-            />
+            {#if nodeInViewport}
+              <StoryboardNode
+                {node}
+                {viewport}
+                {lod}
+                selected={isNodeSelected(cluster.workflow?.id ?? '', node.id)}
+                screenScale={cluster.layout.screenScale}
+                variantScale={cluster.layout.variantScale}
+                workflowId={cluster.workflow?.id ?? ''}
+                thumbnailSrc={getThumbnailSrc(`${cluster.workflow?.id ?? ''}/${node.id}`)}
+                variantThumbnailSrcs={getVariantThumbnailSrcs(cluster.workflow?.id ?? '', node.variants ?? [])}
+                onThumbnailCapture={handleThumbnailCapture}
+                onOpen={onOpenScreen}
+                onSelect={(nodeId) => handleNodeSelect(cluster.workflow?.id ?? '', nodeId)}
+              />
+            {:else}
+              <div aria-hidden="true" style={`height:${node.height}px;`}></div>
+            {/if}
           </div>
         {/each}
       {/each}
