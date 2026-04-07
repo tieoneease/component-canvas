@@ -128,7 +128,7 @@ const CLI_ENTRY_PATH = fileURLToPath(import.meta.url);
 program
   .name('component-canvas')
   .description('Render real Svelte workflow canvases from a .canvas directory.')
-  .version('0.0.0')
+  .version(await readPackageVersion())
   .showHelpAfterError();
 
 program
@@ -1003,4 +1003,15 @@ function displayPath(path: string): string {
 
 function isManifestError(value: unknown): value is ManifestError {
   return isPlainObject(value) && typeof value.file === 'string' && typeof value.message === 'string';
+}
+
+async function readPackageVersion(): Promise<string> {
+  try {
+    const packagePath = resolve(dirname(CLI_ENTRY_PATH), '..', '..', 'package.json');
+    const content = await readFile(packagePath, 'utf8');
+    const parsed = JSON.parse(content);
+    return typeof parsed.version === 'string' ? parsed.version : '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
 }

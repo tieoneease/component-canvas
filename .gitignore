@@ -6,3 +6,4 @@ bun.lock
 .dev/
 tests/output/**/*.png
 shell/dist/
+demo/.canvas/.component-canvas-dev.json
