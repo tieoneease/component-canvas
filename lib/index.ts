@@ -1,4 +1,5 @@
 export * from './adapter.ts';
+export * from './presentation.ts';
 export * from './config.ts';
 export * from './explore.ts';
 export * from './init.ts';

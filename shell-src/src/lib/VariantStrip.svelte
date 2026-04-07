@@ -1,126 +1,63 @@
 <svelte:options runes={true} />
 
 <script>
-  import { previewVariantSrc } from './routing.js'
+  import { previewVariantSrc } from './routing.js';
+
+  const DEFAULT_SCALE = 0.22;
 
   let {
     variants = [],
     workflowId = '',
     screenId = '',
     viewport = { width: 1280, height: 720 },
-    scale = 0.22
-  } = $props()
+    scale = DEFAULT_SCALE,
+    lod = 'full'
+  } = $props();
 
-  const DEFAULT_SCALE = 0.22
-
-  let viewportWidth = $derived(Number(viewport?.width) > 0 ? Number(viewport.width) : 1280)
-  let viewportHeight = $derived(Number(viewport?.height) > 0 ? Number(viewport.height) : 720)
-  let safeScale = $derived(Number(scale) > 0 ? Number(scale) : DEFAULT_SCALE)
-  let itemWidth = $derived(Math.max(viewportWidth * safeScale, 1))
-  let itemHeight = $derived(Math.max(viewportHeight * safeScale, 1))
-  let itemStyle = $derived(`width:${itemWidth}px;height:${itemHeight}px;`)
-  let iframeStyle = $derived(
-    `width:${viewportWidth}px;height:${viewportHeight}px;transform:scale(${safeScale});transform-origin:top left;`
-  )
-  let safeVariants = $derived(Array.isArray(variants) ? variants : [])
+  let viewportWidth = $derived(Number(viewport?.width) > 0 ? Number(viewport.width) : 1280);
+  let viewportHeight = $derived(Number(viewport?.height) > 0 ? Number(viewport.height) : 720);
+  let safeScale = $derived(Number(scale) > 0 ? Number(scale) : DEFAULT_SCALE);
+  let safeLod = $derived(lod === 'minimal' || lod === 'card' ? lod : 'full');
+  let itemWidth = $derived(Math.max(viewportWidth * safeScale, 1));
+  let itemHeight = $derived(Math.max(viewportHeight * safeScale, 1));
+  let safeVariants = $derived(Array.isArray(variants) ? variants : []);
+  let variantCountLabel = $derived(`${safeVariants.length} variant${safeVariants.length === 1 ? '' : 's'}`);
 </script>
 
-{#if safeVariants.length > 0}
-  <div class="variant-strip" data-variant-count={safeVariants.length}>
-    {#each safeVariants as variant, index (`${variant?.id ?? 'variant'}-${index}`)}
-      {@const variantTitle = variant?.title ?? variant?.id ?? 'Variant'}
+{#if safeVariants.length > 0 && safeLod !== 'minimal'}
+  {#if safeLod === 'card'}
+    <div class="flex items-center justify-center" data-variant-count={safeVariants.length} data-lod={safeLod}>
+      <span class="inline-flex items-center rounded-md border border-border bg-card/90 px-3 py-1 text-[10px] font-medium text-foreground shadow-sm">
+        {variantCountLabel}
+      </span>
+    </div>
+  {:else}
+    <div class="flex items-start gap-3" data-variant-count={safeVariants.length} data-lod={safeLod}>
+      {#each safeVariants as variant, index (`${variant?.id ?? 'variant'}-${index}`)}
+        {@const variantTitle = variant?.title ?? variant?.id ?? 'Variant'}
 
-      <div
-        class="variant-strip__item"
-        data-variant-id={variant?.id ?? undefined}
-        style={itemStyle}
-        title={`${variantTitle} preview`}
-      >
-        <iframe
-          title={`${variantTitle} preview for ${screenId || 'screen'}`}
-          src={workflowId && variant?.id ? previewVariantSrc(workflowId, variant.id) : 'about:blank'}
-          loading="lazy"
-          tabindex="-1"
-          style={iframeStyle}
-        ></iframe>
+        <div
+          class="relative flex-none overflow-hidden rounded-lg border border-border bg-card shadow-sm"
+          data-variant-id={variant?.id ?? undefined}
+          style="width:{itemWidth}px;height:{itemHeight}px;"
+          title="{variantTitle} preview"
+        >
+          <iframe
+            title="{variantTitle} preview for {screenId || 'screen'}"
+            src={workflowId && variant?.id ? previewVariantSrc(workflowId, variant.id) : 'about:blank'}
+            loading="lazy"
+            tabindex="-1"
+            class="pointer-events-none block border-0 bg-background"
+            style="width:{viewportWidth}px;height:{viewportHeight}px;transform:scale({safeScale});transform-origin:top left;"
+          ></iframe>
 
-        <div class="variant-strip__badge">
-          <span>{variantTitle}</span>
+          <div class="absolute inset-x-0 bottom-0 flex items-end bg-gradient-to-t from-background via-background/80 to-transparent p-2">
+            <span class="inline-flex max-w-full truncate rounded-md border border-border bg-card/90 px-2 py-0.5 text-[10px] font-medium text-foreground shadow-sm backdrop-blur-sm">
+              {variantTitle}
+            </span>
+          </div>
         </div>
-      </div>
-    {/each}
-  </div>
+      {/each}
+    </div>
+  {/if}
 {/if}
-
-<style>
-  .variant-strip {
-    display: flex;
-    gap: 1rem;
-    align-items: flex-start;
-  }
-
-  .variant-strip__item {
-    position: relative;
-    flex: none;
-    overflow: hidden;
-    border-radius: 20px;
-    border: 1px solid rgba(148, 163, 184, 0.22);
-    background:
-      radial-gradient(circle at top, rgba(99, 102, 241, 0.08), transparent 36%),
-      #ffffff;
-    box-shadow:
-      0 14px 30px rgba(15, 23, 42, 0.14),
-      0 1px 0 rgba(255, 255, 255, 0.8) inset;
-  }
-
-  .variant-strip__item iframe {
-    display: block;
-    border: 0;
-    background: #ffffff;
-    pointer-events: none;
-  }
-
-  .variant-strip__badge {
-    position: absolute;
-    inset-inline: 0;
-    inset-block-end: 0;
-    display: flex;
-    align-items: flex-end;
-    padding: 1.25rem 0.55rem 0.5rem;
-    background: linear-gradient(180deg, transparent 0%, rgba(15, 23, 42, 0.64) 100%);
-  }
-
-  .variant-strip__badge span {
-    display: inline-flex;
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    padding: 0.28rem 0.5rem;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.9);
-    color: #0f172a;
-    font-size: 0.7rem;
-    font-weight: 800;
-    letter-spacing: 0.02em;
-  }
-
-  :global(.dark) .variant-strip__item {
-    border-color: rgba(148, 163, 184, 0.22);
-    background:
-      radial-gradient(circle at top, rgba(129, 140, 248, 0.12), transparent 36%),
-      #020617;
-    box-shadow:
-      0 18px 34px rgba(2, 6, 23, 0.34),
-      0 1px 0 rgba(255, 255, 255, 0.04) inset;
-  }
-
-  :global(.dark) .variant-strip__item iframe {
-    background: #020617;
-  }
-
-  :global(.dark) .variant-strip__badge span {
-    background: rgba(15, 23, 42, 0.84);
-    color: #e2e8f0;
-  }
-</style>

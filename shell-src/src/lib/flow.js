@@ -31,6 +31,9 @@ const VARIANT_PADDING_BOTTOM = 8
 const GROUP_PADDING_X = 28
 const GROUP_PADDING_TOP = 40
 const GROUP_PADDING_BOTTOM = 28
+const DEFAULT_CLUSTER_GAP = 200
+const DEFAULT_CLUSTER_MIN_WIDTH = 280
+const DEFAULT_CLUSTER_MIN_HEIGHT = 180
 
 export function getScreenTitle(screen) {
   return screen?.title ?? screen?.id ?? 'Screen'
@@ -312,6 +315,110 @@ export function computeStoryboardLayout(workflow, viewport, options = {}) {
   }
 }
 
+export function offsetRect(rect, dx = 0, dy = 0) {
+  return {
+    ...(rect ?? {}),
+    x: (rect?.x ?? 0) + dx,
+    y: (rect?.y ?? 0) + dy
+  }
+}
+
+export function offsetNode(node, dx = 0, dy = 0) {
+  return {
+    ...node,
+    left: (node?.left ?? 0) + dx,
+    top: (node?.top ?? 0) + dy,
+    mainRect: offsetRect(node?.mainRect, dx, dy)
+  }
+}
+
+export function offsetGroup(group, dx = 0, dy = 0) {
+  return {
+    ...group,
+    bounds: offsetRect(group?.bounds, dx, dy)
+  }
+}
+
+export function offsetLayout(layout, dx = 0, dy = 0) {
+  return {
+    ...layout,
+    nodes: Array.isArray(layout?.nodes)
+      ? layout.nodes.map((node) => offsetNode(node, dx, dy))
+      : [],
+    treeEdges: Array.isArray(layout?.treeEdges)
+      ? layout.treeEdges.map((edge) => ({
+          ...edge,
+          fromRect: offsetRect(edge?.fromRect, dx, dy),
+          toRect: offsetRect(edge?.toRect, dx, dy)
+        }))
+      : [],
+    groups: Array.isArray(layout?.groups)
+      ? layout.groups.map((group) => offsetGroup(group, dx, dy))
+      : []
+  }
+}
+
+export function computeMultiWorkflowLayout(workflows, viewport, options = {}) {
+  const {
+    clusterGap = DEFAULT_CLUSTER_GAP,
+    clusterMinWidth = DEFAULT_CLUSTER_MIN_WIDTH,
+    clusterMinHeight = DEFAULT_CLUSTER_MIN_HEIGHT,
+    ...layoutOptions
+  } = options
+  const safeWorkflows = Array.isArray(workflows) ? workflows : []
+
+  if (safeWorkflows.length === 0) {
+    return {
+      width: 0,
+      height: 0,
+      clusters: []
+    }
+  }
+
+  const clusters = []
+  let offsetX = 0
+  let maxHeight = 0
+
+  for (const workflow of safeWorkflows) {
+    const layout = computeStoryboardLayout(workflow, viewport, layoutOptions)
+    const layoutBounds = getLayoutBounds(layout)
+    const frameWidth = Math.max(layout.width, layout.nodes.length === 0 ? clusterMinWidth : 0)
+    const frameHeight = Math.max(layout.height, layout.nodes.length === 0 ? clusterMinHeight : 0)
+    const contentOffsetX = offsetX - Math.min(layoutBounds.x, 0)
+    const contentOffsetY = 0 - Math.min(layoutBounds.y, 0)
+
+    clusters.push({
+      workflow,
+      layout,
+      offsetX: contentOffsetX,
+      offsetY: contentOffsetY,
+      layoutBounds,
+      frameBounds: {
+        x: offsetX,
+        y: 0,
+        width: frameWidth,
+        height: frameHeight
+      },
+      contentBounds: {
+        x: layoutBounds.x + contentOffsetX,
+        y: layoutBounds.y + contentOffsetY,
+        width: layoutBounds.width,
+        height: layoutBounds.height
+      },
+      screenCount: safeScreens(workflow).length
+    })
+
+    offsetX += frameWidth + clusterGap
+    maxHeight = Math.max(maxHeight, frameHeight)
+  }
+
+  return {
+    width: Math.max(0, offsetX - clusterGap),
+    height: maxHeight,
+    clusters
+  }
+}
+
 function computeLayoutGroups(workflow, nodes) {
   const groups = Array.isArray(workflow?.groups) ? workflow.groups : []
 
@@ -356,6 +463,43 @@ function computeLayoutGroups(workflow, nodes) {
       }
     }]
   })
+}
+
+function getLayoutBounds(layout) {
+  const rects = [
+    ...(Array.isArray(layout?.nodes)
+      ? layout.nodes.map((node) => ({
+          x: node.left,
+          y: node.top,
+          width: node.width,
+          height: node.height
+        }))
+      : []),
+    ...(Array.isArray(layout?.groups)
+      ? layout.groups.map((group) => group.bounds)
+      : [])
+  ]
+
+  if (rects.length === 0) {
+    return {
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0
+    }
+  }
+
+  const left = Math.min(...rects.map((rect) => rect.x))
+  const top = Math.min(...rects.map((rect) => rect.y))
+  const right = Math.max(...rects.map((rect) => rect.x + rect.width))
+  const bottom = Math.max(...rects.map((rect) => rect.y + rect.height))
+
+  return {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top
+  }
 }
 
 function createGraph(config) {

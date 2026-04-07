@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest'
 import {
   VIEWPORTS,
   classifyEdges,
-  computeStoryboardLayout
+  computeMultiWorkflowLayout,
+  computeStoryboardLayout,
+  offsetLayout
 } from '../shell-src/src/lib/flow.js'
 
 function createWorkflow(overrides: Record<string, unknown> = {}) {
@@ -311,6 +313,82 @@ describe('computeStoryboardLayout', () => {
 
     expect(layout.nodes).toHaveLength(2)
     expect(layout.groups).toEqual([])
+  })
+})
+
+describe('computeMultiWorkflowLayout', () => {
+  it('arranges workflow clusters left-to-right while preserving per-workflow layouts', () => {
+    const authWorkflow = createWorkflow({
+      id: 'auth',
+      title: 'Authentication',
+      transitions: [
+        { from: 'a', to: 'b', trigger: 'next' },
+        { from: 'b', to: 'c', trigger: 'finish' }
+      ]
+    })
+    const settingsWorkflow = createWorkflow({
+      id: 'settings',
+      title: 'Settings',
+      screens: [
+        { id: 'settings-main', component: './Settings.svelte', title: 'Settings' }
+      ]
+    })
+
+    const authLayout = computeStoryboardLayout(authWorkflow, VIEWPORTS.desktop)
+    const multiLayout = computeMultiWorkflowLayout(
+      [authWorkflow, settingsWorkflow],
+      VIEWPORTS.desktop,
+      { clusterGap: 240 }
+    )
+    const [authCluster, settingsCluster] = multiLayout.clusters
+
+    expect(multiLayout.clusters).toHaveLength(2)
+    expect(authCluster.layout).toEqual(authLayout)
+    expect(settingsCluster.frameBounds.x).toBe(
+      authCluster.frameBounds.x + authCluster.frameBounds.width + 240
+    )
+    expect(multiLayout.width).toBe(
+      settingsCluster.frameBounds.x + settingsCluster.frameBounds.width
+    )
+    expect(multiLayout.height).toBeGreaterThanOrEqual(authCluster.frameBounds.height)
+    expect(authCluster.offsetX + authLayout.nodes[0].left).toBeGreaterThanOrEqual(authCluster.frameBounds.x)
+    expect(authCluster.offsetY + authLayout.nodes[0].top).toBeGreaterThanOrEqual(authCluster.frameBounds.y)
+  })
+
+  it('returns empty clusters for empty workflow lists', () => {
+    expect(computeMultiWorkflowLayout([], VIEWPORTS.desktop)).toEqual({
+      width: 0,
+      height: 0,
+      clusters: []
+    })
+  })
+})
+
+describe('offsetLayout', () => {
+  it('offsets nodes, groups, and tree edges without mutating the original layout', () => {
+    const layout = computeStoryboardLayout(
+      createWorkflow({
+        groups: [{ id: 'auth', title: 'Authentication' }],
+        screens: [
+          { id: 'a', component: './A.svelte', title: 'A', group: 'auth' },
+          { id: 'b', component: './B.svelte', title: 'B', group: 'auth' }
+        ],
+        transitions: [{ from: 'a', to: 'b', trigger: 'next' }]
+      }),
+      VIEWPORTS.desktop
+    )
+    const shifted = offsetLayout(layout, 120, 64)
+
+    expect(shifted).not.toBe(layout)
+    expect(shifted.nodes[0].left).toBe(layout.nodes[0].left + 120)
+    expect(shifted.nodes[0].top).toBe(layout.nodes[0].top + 64)
+    expect(shifted.nodes[0].mainRect.x).toBe(layout.nodes[0].mainRect.x + 120)
+    expect(shifted.nodes[0].mainRect.y).toBe(layout.nodes[0].mainRect.y + 64)
+    expect(shifted.groups[0].bounds.x).toBe(layout.groups[0].bounds.x + 120)
+    expect(shifted.groups[0].bounds.y).toBe(layout.groups[0].bounds.y + 64)
+    expect(shifted.treeEdges[0].fromRect.x).toBe(layout.treeEdges[0].fromRect.x + 120)
+    expect(shifted.treeEdges[0].toRect.y).toBe(layout.treeEdges[0].toRect.y + 64)
+    expect(layout.nodes[0].left).not.toBe(shifted.nodes[0].left)
   })
 })
 

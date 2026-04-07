@@ -9,6 +9,10 @@ import { loadConfig } from './config.ts';
 import { parseWorkflowManifests } from './manifest.ts';
 import { access, constants } from 'node:fs/promises';
 import {
+  createPresentationAPIMiddleware,
+  createPresentationRegistry
+} from './presentation.ts';
+import {
   attachRenderRegistry,
   createRenderAPIMiddleware,
   createRenderRegistry
@@ -65,6 +69,7 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
   const canvasConfig = await loadConfig(resolvedProjectRoot);
   const resolvedMocks = mergeStringMaps(canvasConfig?.mocks, options.mocks);
   const renderRegistry = createRenderRegistry();
+  const presentationRegistry = createPresentationRegistry();
   const manifestStreamStore = createManifestStreamStore();
   const basePreviewMiddleware = createPreviewMiddleware();
   const sseMiddleware = createSSEMiddleware({
@@ -132,8 +137,13 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
     );
     attachRenderRegistry(previewServer, renderRegistry);
     const renderApiMiddleware = createRenderAPIMiddleware(previewServer);
+    const presentationApiMiddleware = createPresentationAPIMiddleware(presentationRegistry, renderRegistry);
     const previewMiddleware = createMountedPreviewMiddleware(basePreviewMiddleware, previewServer);
     httpServer = createHttpServer((req, res) => {
+      // Allow loading in credentialless iframes and cross-origin contexts
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+
       handleRequest({
         req,
         res,
@@ -142,6 +152,7 @@ export async function startServer(options: ServerOptions): Promise<StartedServer
         sseMiddleware,
         manifestsApiMiddleware,
         renderApiMiddleware,
+        presentationApiMiddleware,
         shellMiddleware
       });
     });
@@ -197,7 +208,8 @@ async function createPreviewServer(
     logLevel,
     server: {
       ...previewConfig.server,
-      middlewareMode: true
+      middlewareMode: true,
+      allowedHosts: true
     },
     optimizeDeps: previewConfig.optimizeDeps
   });
@@ -247,7 +259,7 @@ function createMountedPreviewMiddleware(
     const base = previewServer.config.base || '/';
     const viteClient = `<script type="module" src="${base}@vite/client"></script>`;
     const transformedHtml = previewHtml
-      .replace('<head>', `<head>\n  ${viteClient}`)
+      .replace('<!--vite-->', viteClient)
       .replace(
         'src="/@id/__x00__component-canvas:preview"',
         `src="${base}@id/__x00__component-canvas:preview"`
@@ -280,6 +292,7 @@ function handleRequest(options: {
   sseMiddleware: Middleware;
   manifestsApiMiddleware: Middleware;
   renderApiMiddleware: Middleware;
+  presentationApiMiddleware: Middleware;
   shellMiddleware: Middleware;
 }): void {
   const {
@@ -290,6 +303,7 @@ function handleRequest(options: {
     sseMiddleware,
     manifestsApiMiddleware,
     renderApiMiddleware,
+    presentationApiMiddleware,
     shellMiddleware
   } = options;
   const pathname = getRequestPath(req);
@@ -299,6 +313,11 @@ function handleRequest(options: {
     routePreviewApiRequest(pathname, '/preview/api/manifests', req, res, manifestsApiMiddleware, previewServer) ||
     routePreviewApiRequest(pathname, '/preview/api/renders', req, res, renderApiMiddleware, previewServer)
   ) {
+    return;
+  }
+
+  if (pathname === '/preview/api/presentations' || pathname.startsWith('/preview/api/presentations/')) {
+    routePreviewApiRequest(pathname, pathname, req, res, presentationApiMiddleware, previewServer);
     return;
   }
 

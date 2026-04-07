@@ -1,3 +1,16 @@
+/**
+ * Detect the base path for the shell. When loaded behind a reverse proxy
+ * (e.g. /proxy/5199/), the pathname includes the prefix. When loaded
+ * directly, the pathname is /.
+ */
+export function getBasePath() {
+  if (typeof window === 'undefined') {
+    return '/';
+  }
+
+  return window.location.pathname.replace(/\/?$/, '/');
+}
+
 export function getHash() {
   if (typeof window === 'undefined') {
     return '#/';
@@ -22,12 +35,20 @@ export function variantHash(workflowId, variantId) {
   return `#/variant/${encodeURIComponent(workflowId)}/${encodeURIComponent(variantId)}`;
 }
 
+export function presentationHash(presentationId) {
+  return `#/presentation/${encodeURIComponent(presentationId)}`;
+}
+
 export function previewScreenSrc(workflowId, screenId) {
-  return `/preview/${screenHash(workflowId, screenId)}`;
+  return `${getBasePath()}preview/${screenHash(workflowId, screenId)}`;
 }
 
 export function previewVariantSrc(workflowId, variantId) {
-  return `/preview/${variantHash(workflowId, variantId)}`;
+  return `${getBasePath()}preview/${variantHash(workflowId, variantId)}`;
+}
+
+export function previewPresentationSrc(presentationId) {
+  return `${getBasePath()}preview/?presentation=${encodeURIComponent(presentationId)}`;
 }
 
 export function parseRoute(hash) {
@@ -63,6 +84,15 @@ export function parseRoute(hash) {
       type: 'variant',
       workflowId: safeDecode(variantMatch[1]),
       variantId: safeDecode(variantMatch[2])
+    };
+  }
+
+  const presentationMatch = normalizedHash.match(/^\/presentation\/([^/]+)$/u);
+
+  if (presentationMatch) {
+    return {
+      type: 'presentation',
+      presentationId: safeDecode(presentationMatch[1])
     };
   }
 

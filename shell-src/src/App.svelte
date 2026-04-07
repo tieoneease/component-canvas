@@ -7,13 +7,16 @@
     VIEWPORTS,
     VIEWPORT_OPTIONS,
     getScreenTitle,
-    summarizeWorkflows
+    summarizeWorkflows,
+    getWorkflowStats
   } from './lib/flow.js';
   import {
+    getBasePath,
     getHash,
     overviewHash,
     parseRoute,
-    previewScreenSrc,
+    presentationHash,
+    previewPresentationSrc,
     screenHash,
     workflowHash
   } from './lib/routing.js';
@@ -22,10 +25,9 @@
     formatManifestTransportError,
     normalizeManifestPayload
   } from './lib/manifests.js';
-  import Overview from './views/Overview.svelte';
-  import Workflow from './views/Workflow.svelte';
+  import ComparisonPanel from './components/ComparisonPanel.svelte';
+  import Canvas from './views/Canvas.svelte';
 
-  const THEME_STORAGE_KEY = 'component-canvas:shell-theme';
   const VIEWPORT_STORAGE_KEY = 'component-canvas:shell-viewport';
 
   let manifestState = $state(emptyManifestState());
@@ -34,72 +36,57 @@
   let transportIssue = $state('');
   let route = $state(parseRoute(getHash()));
   let viewportId = $state(resolveInitialViewportId());
-  let theme = $state(resolveInitialTheme());
+  let sidebarOpen = $state(true);
+  let presentations = $state([]);
+  let workflowFocusRevision = $state(0);
+  let workflowFocusRequest = $state(null);
+  let comparisonScreens = $state([]);
+  let comparisonClearRequest = $state(0);
 
   let workflows = $derived(manifestState.workflows);
   let manifestErrors = $derived(manifestState.errors);
   let viewport = $derived(VIEWPORTS[viewportId] ?? VIEWPORTS.desktop);
   let summary = $derived(summarizeWorkflows(workflows));
   let selectedWorkflow = $derived.by(() => {
-    if (route.type !== 'workflow' && route.type !== 'screen') {
-      return null;
+    if (route.type === 'workflow' || route.type === 'screen' || route.type === 'variant') {
+      return workflows.find((workflow) => workflow.id === route.workflowId) ?? null;
     }
 
-    return workflows.find((workflow) => workflow.id === route.workflowId) ?? null;
+    return null;
   });
-  let selectedScreen = $derived.by(() => {
-    if (route.type !== 'screen' || !selectedWorkflow) {
-      return null;
-    }
-
-    const screens = Array.isArray(selectedWorkflow.screens) ? selectedWorkflow.screens : [];
-
-    return screens.find((screen) => screen.id === route.screenId) ?? null;
+  let selectedPresentation = $derived.by(() => {
+    if (route.type !== 'presentation') return null;
+    return presentations.find((presentation) => presentation.id === route.presentationId) ?? null;
   });
-  let isolatedPreviewSrc = $derived.by(() => {
-    if (!selectedWorkflow || !selectedScreen) {
-      return null;
-    }
-
-    return previewScreenSrc(selectedWorkflow.id, selectedScreen.id);
+  let selectedWorkflowStats = $derived(selectedWorkflow ? getWorkflowStats(selectedWorkflow) : null);
+  let selectedScreenTitle = $derived.by(() => {
+    if (route.type !== 'screen' || !selectedWorkflow) return null;
+    return getScreenTitle(selectedWorkflow.screens?.find((screen) => screen.id === route.screenId));
   });
-  let statusLabel = $derived.by(() => {
-    if (streamStatus === 'live') {
-      return 'Live';
-    }
-
-    if (streamStatus === 'reconnecting') {
-      return 'Reconnecting';
-    }
-
-    return 'Loading';
+  let currentContextTitle = $derived.by(() => {
+    if (selectedPresentation) return selectedPresentation.title;
+    if (selectedWorkflow) return selectedWorkflow.title;
+    return 'Overview';
   });
-  let pageCopy = $derived.by(() => {
-    if (route.type === 'workflow' && selectedWorkflow) {
-      return {
-        title: selectedWorkflow.title,
-        lede: 'Scroll through the live storyboard layout.'
-      };
+  let currentContextMeta = $derived.by(() => {
+    if (selectedWorkflowStats) {
+      return `${selectedWorkflowStats.screenCount} screens · ${viewport.label} ${viewport.width}×${viewport.height}`;
     }
 
-    if (route.type === 'screen' && selectedWorkflow && selectedScreen) {
-      return {
-        title: getScreenTitle(selectedScreen),
-        lede: `Isolated preview for ${selectedWorkflow.title}.`
-      };
+    if (selectedPresentation) {
+      return `${selectedPresentation.items?.length ?? 0} items`;
     }
 
-    if (route.type === 'not-found') {
-      return {
-        title: 'Unknown route',
-        lede: 'This shell route is not recognized.'
-      };
-    }
-
-    return {
-      title: 'Workflow canvas',
-      lede: 'Render real Svelte views as a spatial storyboard through the preview server.'
-    };
+    return `${summary.workflowCount} workflows`;
+  });
+  let streamLabel = $derived.by(() => {
+    if (streamStatus === 'live') return 'Live sync';
+    if (streamStatus === 'reconnecting') return 'Reconnecting';
+    return 'Connecting';
+  });
+  let presentationSrc = $derived.by(() => {
+    if (!selectedPresentation) return null;
+    return previewPresentationSrc(selectedPresentation.id);
   });
 
   onMount(() => {
@@ -107,7 +94,8 @@
       route = parseRoute(getHash());
     };
 
-    const eventSource = new EventSource('/preview/api/manifests/stream');
+    const base = getBasePath();
+    const eventSource = new EventSource(`${base}preview/api/manifests/stream`);
 
     window.addEventListener('hashchange', syncRoute);
 
@@ -123,19 +111,19 @@
         transportIssue = '';
       } catch (error) {
         streamStatus = 'reconnecting';
-        transportIssue = `Failed to parse live manifest update: ${formatManifestTransportError(error)}`;
+        transportIssue = `Failed to parse manifest update: ${formatManifestTransportError(error)}`;
       }
     };
 
     eventSource.onerror = () => {
       streamStatus = 'reconnecting';
-
       if (!transportIssue) {
-        transportIssue = 'Live manifest stream disconnected. The shell will keep retrying.';
+        transportIssue = 'Manifest stream disconnected. Retrying…';
       }
     };
 
     void loadInitialManifests();
+    void loadPresentations();
 
     return () => {
       window.removeEventListener('hashchange', syncRoute);
@@ -144,55 +132,34 @@
   });
 
   $effect(() => {
-    if (typeof document === 'undefined') {
-      return;
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(VIEWPORT_STORAGE_KEY, viewportId);
     }
-
-    const root = document.documentElement;
-
-    root.classList.toggle('dark', theme === 'dark');
-    root.style.colorScheme = theme === 'dark' ? 'dark' : 'light';
-
-    return () => {
-      root.classList.remove('dark');
-      root.style.colorScheme = 'light';
-    };
-  });
-
-  $effect(() => {
-    if (typeof window === 'undefined') {
-      return;
-    }
-
-    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
-  });
-
-  $effect(() => {
-    if (typeof window === 'undefined') {
-      return;
-    }
-
-    window.localStorage.setItem(VIEWPORT_STORAGE_KEY, viewportId);
   });
 
   async function loadInitialManifests() {
     try {
-      const response = await fetch('/preview/api/manifests', {
-        headers: {
-          accept: 'application/json'
-        }
+      const response = await fetch(`${getBasePath()}preview/api/manifests`, {
+        headers: { accept: 'application/json' }
       });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       applyManifestPayload(await response.json());
       transportIssue = '';
     } catch (error) {
       transportIssue = `Failed to fetch manifests: ${formatManifestTransportError(error)}`;
     } finally {
       isLoading = false;
+    }
+  }
+
+  async function loadPresentations() {
+    try {
+      const response = await fetch(`${getBasePath()}preview/api/presentations`);
+      if (response.ok) {
+        presentations = await response.json();
+      }
+    } catch {
+      // silent — presentations are optional
     }
   }
 
@@ -206,52 +173,65 @@
       route = parseRoute(hash);
       return;
     }
-
     if (window.location.hash === hash) {
       route = parseRoute(hash);
       return;
     }
-
     window.location.hash = hash;
   }
 
+  function requestWorkflowFocus(workflowId) {
+    workflowFocusRevision += 1;
+    workflowFocusRequest = {
+      type: 'workflow',
+      workflowId,
+      revision: workflowFocusRevision
+    };
+  }
+
+  function focusWorkflow(workflowId) {
+    requestWorkflowFocus(workflowId);
+  }
+
+  function requestOverviewFocus() {
+    workflowFocusRevision += 1;
+    workflowFocusRequest = {
+      type: 'overview',
+      revision: workflowFocusRevision
+    };
+  }
+
   function openOverview() {
+    requestOverviewFocus();
     navigate(overviewHash());
   }
 
   function openWorkflow(workflowId) {
+    focusWorkflow(workflowId);
     navigate(workflowHash(workflowId));
   }
 
-  function openScreen(workflowId, screenId) {
+  function openScreenRoute(workflowId, screenId) {
+    focusWorkflow(workflowId);
     navigate(screenHash(workflowId, screenId));
   }
 
-  function toggleTheme() {
-    theme = theme === 'dark' ? 'light' : 'dark';
+  function openPresentation(presentationId) {
+    navigate(presentationHash(presentationId));
   }
 
-  function resolveInitialTheme() {
-    if (typeof window === 'undefined') {
-      return 'light';
-    }
+  function handleCanvasSelectionChange(nextSelection) {
+    comparisonScreens = Array.isArray(nextSelection) ? nextSelection : [];
+  }
 
-    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
-
-    if (stored === 'light' || stored === 'dark') {
-      return stored;
-    }
-
-    return window.matchMedia?.('(prefers-color-scheme: dark)')?.matches ? 'dark' : 'light';
+  function clearComparisonSelection() {
+    comparisonScreens = [];
+    comparisonClearRequest += 1;
   }
 
   function resolveInitialViewportId() {
-    if (typeof window === 'undefined') {
-      return 'desktop';
-    }
-
+    if (typeof window === 'undefined') return 'desktop';
     const stored = window.localStorage.getItem(VIEWPORT_STORAGE_KEY);
-
     return stored && stored in VIEWPORTS ? stored : 'desktop';
   }
 </script>
@@ -260,588 +240,258 @@
   <title>component-canvas</title>
 </svelte:head>
 
-<div class={`shell-app ${theme === 'dark' ? 'theme-dark' : 'theme-light'}`}>
-  <header class="shell-header panel">
-    <div class="shell-header__copy">
-      <p class="shell-header__eyebrow">component-canvas</p>
-      <h1>{pageCopy.title}</h1>
-      <p class="shell-header__lede">{pageCopy.lede}</p>
-    </div>
-
-    <div class="shell-header__meta">
-      <div class="shell-status" aria-live="polite">
-        <span class={`shell-status__pill shell-status__pill--${streamStatus}`}>{statusLabel}</span>
-        <small>{isLoading ? 'Loading manifest data…' : 'Streaming preview manifests from /preview/api/manifests/stream.'}</small>
+<div class="flex h-screen overflow-hidden bg-background text-foreground">
+  <aside
+    class={`relative shrink-0 overflow-hidden bg-card/95 transition-[width] duration-200 ease-out ${sidebarOpen ? 'w-56 border-r border-border' : 'w-0 border-r-0'}`}
+  >
+    <div
+      class={`flex h-full min-w-56 flex-col transition-opacity duration-200 ease-out ${sidebarOpen ? 'opacity-100' : 'pointer-events-none opacity-0'}`}
+      aria-hidden={!sidebarOpen}
+    >
+      <div class="border-b border-border p-3">
+        <button
+          type="button"
+          class="flex w-full items-center gap-3 rounded-xl border border-border bg-card px-3 py-3 text-left shadow-sm transition-colors hover:bg-accent/50 hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          onclick={openOverview}
+        >
+          <div class="flex size-10 shrink-0 items-center justify-center rounded-xl border border-border bg-muted/60 text-sm font-semibold text-foreground">
+            CC
+          </div>
+          <div class="min-w-0">
+            <p class="truncate text-sm font-semibold text-foreground">Component Canvas</p>
+            <p class="truncate text-xs text-muted-foreground">
+              {summary.workflowCount} workflows · {summary.screenCount} screens
+            </p>
+          </div>
+        </button>
       </div>
 
-      <div class="shell-controls">
-        <div class="shell-control-group">
-          <span class="shell-control-group__label">Viewport</span>
-          <div class="segmented-control" role="group" aria-label="Viewport">
-            {#each VIEWPORT_OPTIONS as option (option.id)}
+      <div class="border-b border-border px-3 py-3">
+        <div class="px-1 pb-2">
+          <span class="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Viewport</span>
+        </div>
+        <div class="grid grid-cols-2 gap-1 rounded-xl border border-border bg-muted/50 p-1">
+          {#each VIEWPORT_OPTIONS as option (option.id)}
+            <button
+              type="button"
+              class={`rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors hover:bg-accent/50 hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${viewportId === option.id
+                ? 'bg-background text-foreground shadow-sm'
+                : 'text-muted-foreground'}`}
+              onclick={() => {
+                viewportId = option.id;
+              }}
+            >
+              {option.label}
+            </button>
+          {/each}
+        </div>
+      </div>
+
+      <nav class="flex-1 overflow-y-auto py-3">
+        <div class="px-4 pb-2">
+          <span class="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Workflows</span>
+        </div>
+
+        <div class="space-y-1 px-2">
+          {#each workflows as workflow (workflow.id)}
+            {@const stats = getWorkflowStats(workflow)}
+            {@const isActive = selectedWorkflow?.id === workflow.id}
+            <div class="space-y-1 pb-1">
               <button
                 type="button"
-                class:active={viewportId === option.id}
-                aria-pressed={viewportId === option.id}
-                onclick={() => {
-                  viewportId = option.id;
-                }}
+                aria-current={isActive ? 'page' : undefined}
+                class={`group flex w-full items-center gap-3 rounded-lg border border-transparent border-l-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent/50 hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${isActive
+                  ? 'border-border border-l-primary bg-accent text-accent-foreground shadow-sm'
+                  : 'border-l-transparent text-muted-foreground'}`}
+                onclick={() => openWorkflow(workflow.id)}
               >
-                <span>{option.label}</span>
-                <small>{option.width}×{option.height}</small>
+                <span class="min-w-0 flex-1 truncate font-medium">{workflow.title}</span>
+                <span class={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-medium ${isActive ? 'bg-card text-foreground' : 'bg-muted text-muted-foreground'}`}>
+                  {stats.screenCount}
+                </span>
+              </button>
+
+              {#if isActive}
+                <div class="space-y-1 pb-1 pl-3">
+                  {#each workflow.screens as screen (screen.id)}
+                    {@const isScreenActive = route.type === 'screen' && route.workflowId === workflow.id && route.screenId === screen.id}
+                    <button
+                      type="button"
+                      aria-current={isScreenActive ? 'page' : undefined}
+                      class={`group relative flex w-full items-center gap-2 rounded-md border border-transparent px-3 py-1.5 pl-7 text-left text-xs transition-colors hover:bg-accent/50 hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${isScreenActive
+                        ? 'border-border bg-accent text-accent-foreground shadow-sm'
+                        : 'text-muted-foreground'}`}
+                      onclick={() => openScreenRoute(workflow.id, screen.id)}
+                    >
+                      <span class={`absolute left-3 size-1.5 rounded-full ${isScreenActive ? 'bg-primary' : 'bg-muted-foreground'}`}></span>
+                      <span class="truncate">{getScreenTitle(screen)}</span>
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+
+        {#if presentations.length > 0}
+          <div class="mt-4 px-4 pb-2">
+            <span class="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Presentations</span>
+          </div>
+          <div class="space-y-1 px-2">
+            {#each presentations as presentation (presentation.id)}
+              {@const isActivePresentation = selectedPresentation?.id === presentation.id}
+              <button
+                type="button"
+                aria-current={isActivePresentation ? 'page' : undefined}
+                class={`flex w-full items-center gap-3 rounded-lg border border-transparent border-l-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent/50 hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${isActivePresentation
+                  ? 'border-border border-l-primary bg-accent text-accent-foreground shadow-sm'
+                  : 'border-l-transparent text-muted-foreground'}`}
+                onclick={() => openPresentation(presentation.id)}
+              >
+                <span class="min-w-0 flex-1 truncate font-medium">{presentation.title}</span>
+                <span class={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-medium ${isActivePresentation ? 'bg-card text-foreground' : 'bg-muted text-muted-foreground'}`}>
+                  {presentation.items?.length ?? 0}
+                </span>
               </button>
             {/each}
           </div>
-        </div>
+        {/if}
+      </nav>
 
-        <div class="shell-control-group">
-          <span class="shell-control-group__label">Theme</span>
+      <div class="border-t border-border p-3">
+        <div class="rounded-xl border border-border bg-muted/40 p-3 shadow-sm">
+          <div class="flex items-center gap-2">
+            <span
+              class={`size-2.5 shrink-0 rounded-full ${streamStatus === 'live'
+                ? 'bg-emerald-500'
+                : streamStatus === 'reconnecting'
+                  ? 'animate-pulse bg-amber-400'
+                  : 'bg-muted-foreground'}`}
+            ></span>
+            <p class="text-sm font-medium text-foreground">{streamLabel}</p>
+            <span class="ml-auto text-xs text-muted-foreground">{summary.transitionCount} links</span>
+          </div>
+          <p class="mt-1 text-xs text-muted-foreground">
+            {summary.workflowCount} workflows · {summary.screenCount} screens
+          </p>
+          {#if manifestErrors.length > 0}
+            <div class="mt-3 rounded-md bg-destructive/10 px-2.5 py-1.5 text-xs font-medium text-destructive">
+              {manifestErrors.length} manifest error{manifestErrors.length === 1 ? '' : 's'}
+            </div>
+          {/if}
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="flex min-w-0 flex-1 flex-col overflow-hidden bg-background">
+    <header class="flex h-14 flex-none items-center gap-3 border-b border-border bg-card/90 px-4 backdrop-blur-sm">
+      <button
+        type="button"
+        class="inline-flex size-9 items-center justify-center rounded-md border border-transparent text-muted-foreground transition-colors hover:bg-accent/50 hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        title={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
+        onclick={() => {
+          sidebarOpen = !sidebarOpen;
+        }}
+      >
+        <svg class="size-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+        </svg>
+      </button>
+
+      <div class="h-5 w-px shrink-0 bg-border"></div>
+
+      <div class="min-w-0 flex-1">
+        <div class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
           <button
             type="button"
-            class="theme-toggle"
-            aria-pressed={theme === 'dark'}
-            onclick={toggleTheme}
+            class="rounded-md px-1.5 py-1 transition-colors hover:bg-accent/50 hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+            onclick={openOverview}
           >
-            {theme === 'dark' ? 'Dark' : 'Light'}
+            Canvas
           </button>
+          <svg class="size-3 shrink-0" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+            <path d="M4.5 2.25L7.75 6 4.5 9.75" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          <span class="truncate text-sm font-semibold text-foreground">{currentContextTitle}</span>
+          {#if selectedScreenTitle}
+            <span class="shrink-0 text-muted-foreground">/</span>
+            <span class="truncate text-xs text-muted-foreground">{selectedScreenTitle}</span>
+          {/if}
+        </div>
+        <div class="mt-1 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+          <span class="truncate">{currentContextMeta}</span>
         </div>
       </div>
-    </div>
-  </header>
 
-  <section class="stats-bar panel" aria-label="Canvas summary">
-    <div>
-      <strong>{summary.workflowCount}</strong>
-      <span>workflows</span>
-    </div>
-    <div>
-      <strong>{summary.screenCount}</strong>
-      <span>screens</span>
-    </div>
-    <div>
-      <strong>{summary.transitionCount}</strong>
-      <span>transitions</span>
-    </div>
-    <div>
-      <strong>{summary.componentCount}</strong>
-      <span>components</span>
-    </div>
-  </section>
+      <div class="flex items-center gap-3">
+        <div class="hidden items-center gap-2 rounded-full border border-border bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground shadow-sm sm:flex">
+          <span
+            class={`size-2.5 shrink-0 rounded-full ${streamStatus === 'live'
+              ? 'bg-emerald-500'
+              : streamStatus === 'reconnecting'
+                ? 'animate-pulse bg-amber-400'
+                : 'bg-muted-foreground'}`}
+          ></span>
+          <span>{streamLabel}</span>
+        </div>
 
-  {#if transportIssue}
-    <section class="panel panel--warning">
-      <div class="panel__header">
-        <h2>Live update status</h2>
+        {#if transportIssue}
+          <span class="max-w-[18rem] truncate text-xs text-amber-500" title={transportIssue}>
+            {transportIssue}
+          </span>
+        {/if}
       </div>
-      <p>{transportIssue}</p>
-    </section>
-  {/if}
+    </header>
 
-  {#if manifestErrors.length > 0}
-    <section class="panel panel--error">
-      <div class="panel__header">
-        <h2>Manifest issues</h2>
-        <span>{manifestErrors.length}</span>
+    <div class="flex min-h-0 flex-1 flex-col bg-muted/35">
+      <div class="min-h-0 flex-1 overflow-hidden">
+        {#if isLoading}
+          <div class="flex h-full items-center justify-center px-6">
+            <div class="rounded-xl border border-border bg-card px-6 py-5 text-center shadow-sm">
+              <p class="text-sm font-medium text-foreground">Loading canvas…</p>
+              <p class="mt-1 text-xs text-muted-foreground">Waiting for workflow manifests.</p>
+            </div>
+          </div>
+        {:else if workflows.length === 0}
+          <div class="flex h-full items-center justify-center px-6">
+            <div class="max-w-sm rounded-xl border border-border bg-card px-6 py-6 text-center shadow-sm">
+              <p class="text-sm font-semibold text-foreground">No workflows yet</p>
+              <p class="mt-2 text-sm text-muted-foreground">
+                Add a workflow to <code class="rounded-md bg-muted px-1.5 py-0.5 font-mono text-xs">.canvas/workflows/</code> to see it here.
+              </p>
+            </div>
+          </div>
+        {:else if selectedPresentation && presentationSrc}
+          <iframe
+            src={presentationSrc}
+            title={selectedPresentation.title}
+            class="h-full w-full border-0 bg-background"
+            loading="eager"
+          ></iframe>
+        {:else}
+          <Canvas
+            {workflows}
+            {viewport}
+            focusRequest={workflowFocusRequest}
+            activeWorkflowId={selectedWorkflow?.id ?? ''}
+            selectedScreenId={route.type === 'screen' ? route.screenId : null}
+            clearSelectionRequest={comparisonClearRequest}
+            onSelectionChange={handleCanvasSelectionChange}
+            onOpenScreen={(workflowId, screenId) => {
+              navigate(screenHash(workflowId, screenId));
+            }}
+          />
+        {/if}
       </div>
 
-      <ul class="issue-list">
-        {#each manifestErrors as error}
-          <li>
-            <strong>{error.file}</strong>
-            <span>{error.message}</span>
-          </li>
-        {/each}
-      </ul>
-    </section>
-  {/if}
-
-  <main class="shell-main">
-    {#if route.type === 'overview'}
-      <Overview workflows={workflows} theme={theme} onOpenWorkflow={openWorkflow} />
-    {:else if route.type === 'workflow'}
-      {#if selectedWorkflow}
-        <Workflow
-          workflow={selectedWorkflow}
-          {viewport}
-          {theme}
-          onBack={openOverview}
-          onOpenScreen={openScreen}
+      {#if !isLoading && workflows.length > 0 && !(selectedPresentation && presentationSrc) && comparisonScreens.length >= 2}
+        <ComparisonPanel
+          screens={comparisonScreens}
+          onClear={clearComparisonSelection}
+          basePath={getBasePath()}
         />
-      {:else}
-        <section class="panel panel--empty">
-          <h2>Workflow not found</h2>
-          <p>The route <code>{route.workflowId}</code> does not match any loaded workflow.</p>
-          <a href={overviewHash()} onclick={(event) => {
-            event.preventDefault();
-            openOverview();
-          }}>Return to overview</a>
-        </section>
       {/if}
-    {:else if route.type === 'screen'}
-      {#if selectedWorkflow && selectedScreen && isolatedPreviewSrc}
-        <section class="panel isolated-screen-panel">
-          <div class="isolated-screen-panel__header">
-            <div>
-              <a
-                class="isolated-screen-panel__back"
-                href={workflowHash(selectedWorkflow.id)}
-                onclick={(event) => {
-                  event.preventDefault();
-                  openWorkflow(selectedWorkflow.id);
-                }}
-              >
-                ← Back to workflow
-              </a>
-              <h2>{getScreenTitle(selectedScreen)}</h2>
-              <p>{selectedWorkflow.title}</p>
-            </div>
-
-            <a class="isolated-screen-panel__action" href={isolatedPreviewSrc} target="_blank" rel="noreferrer">
-              Open preview tab
-            </a>
-          </div>
-
-          <div class="isolated-screen-panel__body">
-            <div
-              class="isolated-screen-panel__frame"
-              style={`width:${viewport.width}px;height:${viewport.height}px;`}
-            >
-              <iframe
-                src={isolatedPreviewSrc}
-                title={getScreenTitle(selectedScreen)}
-                data-isolated-screen={selectedScreen.id}
-              ></iframe>
-            </div>
-          </div>
-        </section>
-      {:else}
-        <section class="panel panel--empty">
-          <h2>Screen not found</h2>
-          <p>Could not resolve screen <code>{route.screenId}</code> in workflow <code>{route.workflowId}</code>.</p>
-          <a href={overviewHash()} onclick={(event) => {
-            event.preventDefault();
-            openOverview();
-          }}>Return to overview</a>
-        </section>
-      {/if}
-    {:else}
-      <section class="panel panel--empty">
-        <h2>Unknown route</h2>
-        <p>This shell route is not recognized.</p>
-        <a href={overviewHash()} onclick={(event) => {
-          event.preventDefault();
-          openOverview();
-        }}>Return to overview</a>
-      </section>
-    {/if}
+    </div>
   </main>
 </div>
-
-<style>
-  :global(html) {
-    background: #eef2ff;
-  }
-
-  :global(body) {
-    background: inherit;
-    color: inherit;
-  }
-
-  :global(code) {
-    font-family: 'SFMono-Regular', ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-
-  .shell-app {
-    --canvas-page-bg: linear-gradient(180deg, #eef2ff 0%, #f8fafc 48%, #f1f5f9 100%);
-    --canvas-surface: rgba(255, 255, 255, 0.76);
-    --canvas-border: rgba(148, 163, 184, 0.24);
-    --canvas-text: #0f172a;
-    --canvas-muted: #64748b;
-    --canvas-accent: #4f46e5;
-    min-height: 100vh;
-    padding: 1.5rem;
-    background: var(--canvas-page-bg);
-    color: var(--canvas-text);
-  }
-
-  .shell-app.theme-dark {
-    --canvas-page-bg:
-      radial-gradient(circle at top, rgba(79, 70, 229, 0.24), transparent 28%),
-      linear-gradient(180deg, #020617 0%, #0f172a 52%, #111827 100%);
-    --canvas-surface: rgba(15, 23, 42, 0.78);
-    --canvas-border: rgba(148, 163, 184, 0.22);
-    --canvas-text: #e2e8f0;
-    --canvas-muted: #94a3b8;
-    --canvas-accent: #a5b4fc;
-  }
-
-  .shell-main {
-    display: grid;
-    gap: 1rem;
-  }
-
-  .panel {
-    border: 1px solid var(--canvas-border);
-    border-radius: 28px;
-    background: var(--canvas-surface);
-    box-shadow: 0 22px 60px rgba(15, 23, 42, 0.08);
-    backdrop-filter: blur(22px);
-  }
-
-  .shell-header {
-    display: grid;
-    grid-template-columns: minmax(0, 1.1fr) minmax(20rem, 0.9fr);
-    gap: 1.25rem;
-    padding: 1.4rem;
-    margin-bottom: 1rem;
-  }
-
-  .shell-header__copy h1 {
-    margin: 0;
-    font-size: clamp(2rem, 3vw, 2.75rem);
-    line-height: 1;
-  }
-
-  .shell-header__eyebrow {
-    margin: 0 0 0.55rem;
-    font-size: 0.8rem;
-    font-weight: 800;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--canvas-muted);
-  }
-
-  .shell-header__lede {
-    margin: 0.65rem 0 0;
-    max-width: 38rem;
-    color: var(--canvas-muted);
-  }
-
-  .shell-header__meta {
-    display: grid;
-    gap: 1rem;
-  }
-
-  .shell-status {
-    display: grid;
-    gap: 0.35rem;
-    justify-items: start;
-    padding: 1rem 1.1rem;
-    border-radius: 22px;
-    background: rgba(255, 255, 255, 0.56);
-    border: 1px solid rgba(148, 163, 184, 0.14);
-  }
-
-  .shell-status small {
-    color: var(--canvas-muted);
-  }
-
-  .shell-status__pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.45rem;
-    padding: 0.4rem 0.75rem;
-    border-radius: 999px;
-    font-size: 0.75rem;
-    font-weight: 800;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-
-  .shell-status__pill--live {
-    background: rgba(34, 197, 94, 0.14);
-    color: #15803d;
-  }
-
-  .shell-status__pill--connecting,
-  .shell-status__pill--reconnecting {
-    background: rgba(245, 158, 11, 0.16);
-    color: #b45309;
-  }
-
-  .shell-controls {
-    display: grid;
-    gap: 0.9rem;
-  }
-
-  .shell-control-group {
-    display: grid;
-    gap: 0.45rem;
-  }
-
-  .shell-control-group__label {
-    font-size: 0.72rem;
-    font-weight: 800;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--canvas-muted);
-  }
-
-  .segmented-control {
-    display: inline-flex;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-  }
-
-  .segmented-control button,
-  .theme-toggle {
-    appearance: none;
-    border: 1px solid rgba(148, 163, 184, 0.2);
-    border-radius: 16px;
-    background: rgba(255, 255, 255, 0.62);
-    color: inherit;
-    cursor: pointer;
-    transition:
-      transform 140ms ease,
-      background 140ms ease,
-      border-color 140ms ease;
-  }
-
-  .segmented-control button {
-    display: grid;
-    gap: 0.18rem;
-    min-width: 7.5rem;
-    padding: 0.7rem 0.9rem;
-    text-align: left;
-  }
-
-  .segmented-control button small {
-    color: var(--canvas-muted);
-  }
-
-  .segmented-control button.active,
-  .theme-toggle {
-    border-color: rgba(99, 102, 241, 0.3);
-  }
-
-  .segmented-control button.active {
-    background: rgba(99, 102, 241, 0.14);
-    color: var(--canvas-accent);
-  }
-
-  .theme-toggle {
-    width: fit-content;
-    padding: 0.7rem 1rem;
-    font-weight: 700;
-  }
-
-  .segmented-control button:hover,
-  .theme-toggle:hover {
-    transform: translateY(-1px);
-  }
-
-  .stats-bar {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 0.85rem;
-    padding: 1rem;
-    margin-bottom: 1rem;
-  }
-
-  .stats-bar div {
-    display: grid;
-    gap: 0.2rem;
-    padding: 0.95rem 1rem;
-    border-radius: 20px;
-    background: rgba(255, 255, 255, 0.56);
-    border: 1px solid rgba(148, 163, 184, 0.12);
-  }
-
-  .stats-bar strong {
-    font-size: 1.2rem;
-  }
-
-  .stats-bar span {
-    color: var(--canvas-muted);
-    font-size: 0.82rem;
-  }
-
-  .panel__header {
-    display: flex;
-    justify-content: space-between;
-    gap: 1rem;
-    align-items: center;
-    padding: 1.1rem 1.25rem 0;
-  }
-
-  .panel__header h2 {
-    margin: 0;
-    font-size: 1.1rem;
-  }
-
-  .panel__header span {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 2rem;
-    height: 2rem;
-    padding: 0 0.5rem;
-    border-radius: 999px;
-    background: rgba(248, 113, 113, 0.16);
-    color: #dc2626;
-    font-weight: 800;
-  }
-
-  .panel--warning {
-    margin-bottom: 1rem;
-    padding: 0 1.25rem 1.2rem;
-    border-color: rgba(245, 158, 11, 0.24);
-  }
-
-  .panel--warning p {
-    margin: 0.75rem 0 0;
-    color: var(--canvas-muted);
-  }
-
-  .panel--error {
-    margin-bottom: 1rem;
-    border-color: rgba(248, 113, 113, 0.28);
-  }
-
-  .issue-list {
-    list-style: none;
-    margin: 0;
-    padding: 1rem 1.25rem 1.2rem;
-    display: grid;
-    gap: 0.75rem;
-  }
-
-  .issue-list li {
-    display: grid;
-    gap: 0.25rem;
-    padding: 0.9rem 1rem;
-    border-radius: 18px;
-    background: rgba(254, 242, 242, 0.82);
-    color: #991b1b;
-  }
-
-  .issue-list strong {
-    font-size: 0.9rem;
-    word-break: break-all;
-  }
-
-  .isolated-screen-panel {
-    overflow: hidden;
-  }
-
-  .isolated-screen-panel__header {
-    display: flex;
-    justify-content: space-between;
-    gap: 1rem;
-    align-items: flex-start;
-    padding: 1.25rem 1.35rem 0;
-  }
-
-  .isolated-screen-panel__back {
-    display: inline-flex;
-    margin-bottom: 0.55rem;
-    color: var(--canvas-accent);
-    font-weight: 700;
-    text-decoration: none;
-  }
-
-  .isolated-screen-panel__header h2,
-  .isolated-screen-panel__header p {
-    margin: 0;
-  }
-
-  .isolated-screen-panel__header p {
-    margin-top: 0.45rem;
-    color: var(--canvas-muted);
-  }
-
-  .isolated-screen-panel__action {
-    flex: none;
-    padding: 0.7rem 0.95rem;
-    border-radius: 999px;
-    background: rgba(99, 102, 241, 0.12);
-    border: 1px solid rgba(99, 102, 241, 0.24);
-    color: var(--canvas-accent);
-    font-size: 0.82rem;
-    font-weight: 800;
-    text-decoration: none;
-  }
-
-  .isolated-screen-panel__body {
-    overflow: auto;
-    padding: 1.25rem;
-    display: grid;
-    justify-items: center;
-  }
-
-  .isolated-screen-panel__frame {
-    flex: none;
-    border-radius: 28px;
-    overflow: hidden;
-    border: 1px solid rgba(148, 163, 184, 0.22);
-    background: #ffffff;
-    box-shadow: 0 22px 52px rgba(15, 23, 42, 0.18);
-  }
-
-  .isolated-screen-panel__frame iframe {
-    width: 100%;
-    height: 100%;
-    border: 0;
-    background: #ffffff;
-  }
-
-  .panel--empty {
-    display: grid;
-    justify-items: center;
-    gap: 0.5rem;
-    padding: 3rem 1.5rem;
-    text-align: center;
-  }
-
-  .panel--empty h2,
-  .panel--empty p {
-    margin: 0;
-  }
-
-  .panel--empty p {
-    color: var(--canvas-muted);
-  }
-
-  .panel--empty a {
-    color: var(--canvas-accent);
-    font-weight: 700;
-    text-decoration: none;
-  }
-
-  @media (max-width: 960px) {
-    .shell-header {
-      grid-template-columns: 1fr;
-    }
-
-    .stats-bar {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-  }
-
-  @media (max-width: 720px) {
-    .isolated-screen-panel__header {
-      flex-direction: column;
-    }
-  }
-
-  @media (max-width: 640px) {
-    .shell-app {
-      padding: 1rem;
-    }
-
-    .shell-header,
-    .stats-bar,
-    .panel__header,
-    .issue-list,
-    .panel--warning,
-    .panel--empty,
-    .isolated-screen-panel__header,
-    .isolated-screen-panel__body {
-      padding-inline: 1rem;
-    }
-
-    .stats-bar {
-      grid-template-columns: 1fr 1fr;
-    }
-  }
-</style>
