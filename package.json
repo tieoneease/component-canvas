@@ -1,6 +1,6 @@
 {
-  "name": "component-canvas",
-  "version": "0.0.0",
+  "name": "@tieoneease/component-canvas",
+  "version": "0.1.0",
   "type": "module",
   "bin": {
     "component-canvas": "./bin/cli.ts"
@@ -10,6 +10,13 @@
     "lib",
     "shell/dist"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tieoneease/component-canvas.git"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
