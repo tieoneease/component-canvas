@@ -1,5 +1,6 @@
+import { existsSync } from 'node:fs';
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { Connect, InlineConfig, UserConfig, ViteDevServer } from 'vite';
@@ -50,7 +51,7 @@ const DEFAULT_PORT = 5173;
 const MAX_PORT_ATTEMPTS = 20;
 const VITE_REQUEST_PREFIXES = ['/@fs', '/@id', '/@vite', '/__', '/node_modules', '/src', '/virtual:'];
 
-const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const packageRoot = findPackageRoot(dirname(fileURLToPath(import.meta.url)));
 const packageResolutionFallbacks = [packageRoot];
 const shellDistDir = resolve(packageRoot, 'shell', 'dist');
 
@@ -622,4 +623,26 @@ async function detectGlobalCss(
   }
 
   return undefined;
+}
+
+/**
+ * Walk up from the given directory until we find a directory containing
+ * package.json. Works whether the code runs from `lib/` (source) or
+ * `dist/lib/` (compiled).
+ */
+function findPackageRoot(startDir: string): string {
+  let dir = resolve(startDir);
+  const { root } = Object.assign({}, { root: '/' });
+
+  while (dir !== root) {
+    if (existsSync(join(dir, 'package.json'))) {
+      return dir;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+
+  // Fallback: assume one level up from the starting directory
+  return resolve(startDir, '..');
 }
